@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>awstree</title>
+<style>
+:root {
+  --bg: #0d1016; --frame: #050608; --panel: #11151c; --line: #222835; --text: #d6dae2;
+  --muted: #7c8494; --dim: #545b69; --accent: #e3a55a; --neutral: #5a6170;
+  --compute: #d4874b; --storage: #4d8ad6; --database: #c25c90; --network: #3cae9f;
+  --ai: #9870ee; --analytics: #cbb04a; --ops: #5fb06a; --other: #858b97;
+  --up: #e5534b; --down: #3fb68b;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--frame); color: var(--text);
+  font: 12px/1.35 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+  font-variant-numeric: tabular-nums; overflow: hidden; }
+.app { position: fixed; inset: 10px; display: grid; background: var(--bg); border: 1px solid var(--line);
+  border-radius: 10px; overflow: hidden;
+  grid-template-columns: minmax(0, 1fr) 300px; grid-template-rows: auto auto minmax(0, 1fr) auto; }
+
+header { grid-column: 1 / -1; display: flex; align-items: center; gap: 14px; padding: 9px 14px;
+  border-bottom: 1px solid var(--line); min-width: 0; }
+.logo { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 600; letter-spacing: .2px; }
+.logo i { display: grid; grid-template-columns: 7px 7px; gap: 2px; }
+.logo i b { width: 7px; height: 7px; border-radius: 1px; }
+.crumbs { color: var(--dim); display: flex; gap: 6px; align-items: center; min-width: 0; overflow: hidden; white-space: nowrap; }
+.crumbs a { color: var(--muted); cursor: pointer; text-decoration: none; }
+.crumbs a:hover { color: var(--text); }
+.crumbs .cur { color: var(--text); background: #1b212c; padding: 2px 7px; border-radius: 4px; }
+.spacer { flex: 1; }
+.seg { display: flex; border: 1px solid var(--line); border-radius: 6px; padding: 2px; gap: 2px; }
+.seg button { background: none; border: 0; color: var(--muted); font: inherit; padding: 4px 11px; border-radius: 4px; cursor: pointer; }
+.seg button.on { background: #222938; color: var(--text); }
+.seg button:hover { color: var(--text); }
+label.chk { display: flex; align-items: center; gap: 6px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+label.chk input { accent-color: var(--accent); margin: 0; }
+#export { background: none; border: 1px solid var(--line); color: var(--muted); font: inherit; padding: 5px 10px;
+  border-radius: 6px; cursor: pointer; white-space: nowrap; }
+#export:hover { color: var(--text); border-color: #3a4356; }
+#filter { background: #0a0d12; border: 1px solid var(--line); color: var(--text); font: inherit; padding: 5px 9px;
+  border-radius: 6px; width: 170px; outline: none; }
+#filter:focus { border-color: #3a4356; }
+
+.sub { display: flex; align-items: center; gap: 16px; padding: 8px 14px 6px; color: var(--muted); min-width: 0; overflow: hidden; white-space: nowrap; }
+.sub b { color: var(--text); font-weight: 600; }
+.legend { display: flex; gap: 12px; margin-left: auto; }
+.legend span { display: flex; align-items: center; gap: 5px; }
+.legend i { width: 9px; height: 9px; border-radius: 2px; }
+
+#map { position: relative; margin: 2px 8px 8px 12px; min-height: 0; }
+.cell { position: absolute; overflow: hidden; border-radius: 2px; cursor: pointer; }
+.leaf { background: color-mix(in srgb, var(--c) 30%, var(--bg)); border: 1px solid color-mix(in srgb, var(--c) 48%, var(--bg)); padding: 3px 5px; }
+.leaf:hover { background: color-mix(in srgb, var(--c) 46%, var(--bg)); }
+.group { background: color-mix(in srgb, var(--c) 9%, var(--bg)); border: 1px solid color-mix(in srgb, var(--c) 30%, var(--bg));
+  border-top: 2px solid color-mix(in srgb, var(--c) 75%, var(--bg)); }
+.gh { display: flex; justify-content: space-between; gap: 6px; padding: 1px 5px; height: 17px; white-space: nowrap; }
+.gh .n { color: var(--text); overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
+.gh .v { color: var(--muted); font-size: 10.5px; }
+.leaf .n { color: #e3e6ec; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.leaf .v { color: color-mix(in srgb, var(--c) 45%, #9aa1ad); font-size: 10.5px; white-space: nowrap; }
+.cell.sel { outline: 2px solid #f1f3f7; outline-offset: -2px; z-index: 2; }
+.empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 14px; }
+
+aside { grid-column: 2; grid-row: 2 / 4; border-left: 1px solid var(--line); background: var(--panel);
+  padding: 14px 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 18px; }
+.h { color: var(--dim); font-size: 10.5px; letter-spacing: .8px; text-transform: uppercase; display: flex; justify-content: space-between; }
+.h b { color: var(--accent); font-weight: 500; letter-spacing: 0; }
+.sel-name { font-size: 16px; border-left: 2px solid var(--accent); padding-left: 8px; margin-top: 8px; word-break: break-word; }
+.sel-path { color: var(--dim); margin: 3px 0 0 10px; word-break: break-word; }
+.big { font-size: 34px; font-weight: 300; margin-top: 10px; letter-spacing: -.5px; }
+.big small { font-size: 14px; color: var(--muted); margin-left: 2px; }
+.bar { height: 4px; background: #1d2330; border-radius: 2px; margin-top: 8px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--accent); }
+.stats { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 10px; margin-top: 14px; }
+.stats div span { display: block; color: var(--dim); font-size: 10px; letter-spacing: .6px; text-transform: uppercase; margin-bottom: 2px; }
+.stats div { font-size: 13px; }
+.stats b { font-weight: 400; }
+.upc { color: var(--up); } .downc { color: var(--down); }
+.spark { margin-top: 14px; }
+.spark svg { display: block; width: 100%; height: 46px; }
+.spark .axis { display: flex; justify-content: space-between; color: var(--dim); font-size: 10px; margin-top: 3px; }
+.hint { display: grid; grid-template-columns: 1fr auto; gap: 1px 10px; border-left: 2px solid var(--c, var(--accent));
+  padding: 2px 0 2px 9px; cursor: pointer; margin-top: 11px; }
+.hint:hover .hn { color: #fff; }
+.hn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hv { text-align: right; }
+.hs { color: var(--dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hb { height: 3px; background: #1d2330; border-radius: 2px; align-self: center; width: 80px; overflow: hidden; }
+.hb i { display: block; height: 100%; background: var(--c, var(--accent)); opacity: .8; }
+.bill { margin-top: auto; border-top: 1px solid var(--line); padding-top: 14px; }
+.bill .big { font-size: 26px; margin-top: 6px; }
+.bill-row { display: flex; justify-content: space-between; color: var(--muted); margin-top: 5px; }
+.bill-row b { color: var(--text); font-weight: 400; }
+
+footer { grid-column: 1 / -1; display: flex; align-items: center; gap: 14px; padding: 7px 14px; border-top: 1px solid var(--line);
+  color: var(--dim); white-space: nowrap; overflow: hidden; }
+kbd { font: 10.5px ui-monospace, Menlo, monospace; color: var(--muted); border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; margin-right: 4px; }
+.badge { color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); border-radius: 4px; padding: 0 6px; }
+
+#tip { position: fixed; pointer-events: none; background: #1a1f29; border: 1px solid #2c3444; border-radius: 6px; padding: 7px 9px;
+  z-index: 10; display: none; max-width: 320px; box-shadow: 0 6px 24px #0008; }
+#tip .t1 { color: var(--text); word-break: break-word; }
+#tip .t2 { color: var(--muted); margin-top: 3px; }
+
+@media (max-width: 900px) {
+  .app { grid-template-columns: 1fr; grid-template-rows: auto auto 60vh auto auto; overflow-y: auto; }
+  aside { grid-column: 1; grid-row: 4; border-left: 0; border-top: 1px solid var(--line); }
+  footer { grid-row: 5; }
+  header { flex-wrap: wrap; } .legend { display: none; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="logo"><i><b style="background:var(--compute)"></b><b style="background:var(--storage)"></b><b style="background:var(--database)"></b><b style="background:var(--network)"></b></i>awstree</div>
+    <div class="crumbs" id="crumbs"></div>
+    <div class="spacer"></div>
+    <div class="seg" id="views">
+      <button data-v="service">Service</button><button data-v="account">Account</button><button data-v="region">Region</button>
+    </div>
+    <label class="chk"><input type="checkbox" id="change"> Color by change</label>
+    <button id="export" title="Download a JSON summary to give to an AI agent (e)">Export for AI</button>
+    <input id="filter" placeholder="filter  /" autocomplete="off" spellcheck="false">
+  </header>
+  <div class="sub" id="sub"></div>
+  <div id="map"></div>
+  <aside id="side"></aside>
+  <footer>
+    <span><kbd>click</kbd>select</span><span><kbd>dbl-click</kbd><kbd>enter</kbd>open</span><span><kbd>⌫</kbd>up</span>
+    <span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd>view</span><span><kbd>c</kbd>color</span><span><kbd>/</kbd>filter</span><span><kbd>e</kbd>export</span><span><kbd>esc</kbd>clear</span>
+    <span class="spacer"></span><span id="meta"></span>
+  </footer>
+</div>
+<div id="tip"></div>
+
+<script>
+const DATA = __AWSTREE_DATA__;
+
+const N = DATA.days.length, SPLIT = DATA.split, DAYS = N - SPLIT;
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const state = { view: "service", change: false, filter: "", zoom: null, sel: null };
+
+// ---------- formatting
+function money(v) {
+  const a = Math.abs(v), s = v < 0 ? "-$" : "$";
+  if (a >= 1e6) return s + (a / 1e6).toFixed(2) + "M";
+  if (a >= 1e4) return s + (a / 1e3).toFixed(1) + "k";
+  if (a >= 100) return s + Math.round(a).toLocaleString("en-US");
+  return s + a.toFixed(2);
+}
+function bigMoney(v) {
+  const [w, c] = Math.abs(v).toFixed(2).split(".");
+  return `${v < 0 ? "-" : ""}$${Number(w).toLocaleString("en-US")}<small>.${c}</small>`;
+}
+const pct = v => (v >= 0.1 || v === 0 ? Math.round(v * 100) : (v * 100).toFixed(1)) + "%";
+const day = s => new Date(s + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" });
+const period = () => `${day(DATA.days[SPLIT])} – ${day(DATA.days[N - 1])}`;
+
+// ---------- names and categories
+const SHORT = {
+  "Amazon Elastic Compute Cloud - Compute": "EC2", "Amazon Relational Database Service": "RDS",
+  "Amazon Simple Storage Service": "S3", "Amazon Virtual Private Cloud": "VPC", "Amazon Elastic Kubernetes Service": "EKS",
+  "Amazon Elastic Container Service": "ECS", "Amazon EC2 Container Registry (ECR)": "ECR", "Amazon Elastic Load Balancing": "ELB",
+  "Amazon Elastic File System": "EFS", "Amazon Simple Queue Service": "SQS", "Amazon Simple Notification Service": "SNS",
+  "Amazon Simple Email Service": "SES", "AWS Key Management Service": "KMS", "Amazon Elastic MapReduce": "EMR",
+  "Amazon Elastic Container Service for Kubernetes": "EKS", "AmazonCloudWatch": "CloudWatch",
+};
+// usage types start with a region code (USE1-, EUW2-, US-...): shown separately so the name fits
+const REGION_PREFIX = /^[A-Z]{2,4}\d?-(?=[A-Za-z])/;
+const regionOf = n => (n.dim === "USAGE_TYPE" && (n.key.match(REGION_PREFIX) || [""])[0].slice(0, -1)) || "";
+const shortSvc = s => SHORT[s] || s.replace(/^(Amazon|AWS)\s+/, "");
+const DIM = {
+  SERVICE: { one: "service", many: "services", label: (v) => shortSvc(v) },
+  USAGE_TYPE: { one: "usage type", many: "usage types", label: (v) => v.replace(REGION_PREFIX, "") || v },
+  LINKED_ACCOUNT: { one: "account", many: "accounts", label: (v, names) => names[v] || v },
+  REGION: { one: "region", many: "regions", label: (v) => (!v || v === "NoRegion" ? "global" : v) },
+};
+const CATS = [
+  ["compute", "Compute"], ["storage", "Storage"], ["database", "Database"], ["network", "Network"],
+  ["ai", "AI / ML"], ["analytics", "Analytics"], ["ops", "Ops & security"], ["other", "Other"],
+];
+const SVC_RULES = [
+  ["ai", /Bedrock|SageMaker|Rekognition|Comprehend|Textract|Transcribe|Polly|Translate|Kendra|Amazon Q\b|\bLex\b|Personalize/i],
+  ["database", /Relational|\bRDS\b|DynamoDB|ElastiCache|Aurora|Redshift|DocumentDB|Neptune|Keyspaces|MemoryDB|Timestream/i],
+  ["analytics", /Athena|Glue|MapReduce|\bEMR\b|Kinesis|OpenSearch|Elasticsearch|QuickSight|Kafka|\bMSK\b|Firehose/i],
+  ["storage", /Simple Storage|\bS3\b|Elastic File|Glacier|Backup|FSx|Storage Gateway|Container Registry/i],
+  ["network", /CloudFront|Virtual Private Cloud|\bVPC\b|Route 53|Load Balanc|Data Transfer|Direct Connect|Global Accelerator|API Gateway|Transit|Network Firewall/i],
+  ["ops", /CloudWatch|CloudTrail|\bConfig\b|Systems Manager|X-Ray|Security Hub|GuardDuty|Inspector|Key Management|Secrets Manager|\bWAF\b|Shield|Macie|Detective/i],
+  ["compute", /Elastic Compute|EC2|Lambda|Container Service|Kubernetes|Fargate|Lightsail|Batch|App Runner|Beanstalk|Step Functions/i],
+];
+const UT_RULES = [
+  ["storage", /EBS:|SnapshotUsage|VolumeUsage|TimedStorage|Storage/i],
+  ["network", /DataTransfer|NatGateway|IPv4|ElasticIP|LoadBalancerUsage|LCUUsage|VpcEndpoint|AWS-(In|Out)-Bytes/i],
+];
+const match = (rules, s) => (rules.find(([, re]) => re.test(s)) || [])[0];
+const svcCat = s => match(SVC_RULES, s) || "other";
+
+function category(n) {
+  const [A, B] = DATA.views[state.view].dims;
+  const dim = n.kind === "leaf" ? B : A;
+  if (dim === "USAGE_TYPE") return match(UT_RULES, n.key) || svcCat(n.parent.key);
+  if (dim === "SERVICE") return svcCat(n.key);
+  return null;
+}
+function color(n) {
+  if (state.change) {
+    if (n.prev < 0.01) return n.cur >= 0.5 ? "var(--up)" : "var(--neutral)";
+    const p = (n.cur - n.prev) / n.prev;
+    if (Math.abs(p) < 0.05) return "var(--neutral)";
+    const t = Math.min(Math.abs(p) / 0.6, 1);
+    return `color-mix(in srgb, var(${p > 0 ? "--up" : "--down"}) ${Math.round(35 + 65 * t)}%, var(--neutral))`;
+  }
+  const c = category(n);
+  return c ? `var(--${c})` : "var(--neutral)";
+}
+
+// ---------- tree
+function buildTree(viewKey, filter) {
+  const v = DATA.views[viewKey], names = v.names || {};
+  const [A, B] = v.dims, q = filter.toLowerCase();
+  const root = { kind: "root", name: "all", children: [], daily: new Float64Array(N) };
+  const groups = new Map();
+  for (const r of v.rows) {
+    const [a, b] = A === "REGION" && (!r.k[0] || r.k[0] === "NoRegion") ? ["global", r.k[1]] : r.k;
+    const ga = DIM[A].label(a, names), lb = DIM[B].label(b, names);
+    if (q && !`${a} ${b} ${ga} ${lb}`.toLowerCase().includes(q)) continue;
+    let g = groups.get(a);
+    if (!g) {
+      g = { kind: "group", key: a, name: ga, full: a, dim: A, parent: root, children: [], daily: new Float64Array(N) };
+      groups.set(a, g); root.children.push(g);
+    }
+    g.children.push({ kind: "leaf", key: b, name: lb, full: b, dim: B, parent: g, daily: Float64Array.from(r.d) });
+  }
+  (function total(n) {
+    if (n.children) {
+      for (const c of n.children) { total(c); for (let i = 0; i < N; i++) n.daily[i] += c.daily[i]; }
+      n.children = n.children.filter(c => c.cur >= 0.005).sort((a, b) => b.cur - a.cur);
+    }
+    n.prev = 0; n.cur = 0;
+    for (let i = 0; i < N; i++) i < SPLIT ? (n.prev += n.daily[i]) : (n.cur += n.daily[i]);
+  })(root);
+  return root;
+}
+let root = buildTree(state.view, "");
+const grand = buildTree("service", "").cur; // shares are always of the whole bill, even when filtered
+
+// ---------- squarified treemap layout
+function squarify(nodes, x, y, w, h) {
+  const out = [], total = nodes.reduce((s, n) => s + n.cur, 0);
+  if (total <= 0 || w < 1 || h < 1) return out;
+  let items = nodes.map(n => ({ n, a: (n.cur / total) * w * h }));
+  const worst = (row, side) => {
+    let s = 0, mx = 0, mn = Infinity;
+    for (const r of row) { s += r.a; mx = Math.max(mx, r.a); mn = Math.min(mn, r.a); }
+    return Math.max((side * side * mx) / (s * s), (s * s) / (side * side * mn));
+  };
+  while (items.length) {
+    const side = Math.min(w, h);
+    let row = [items[0]], best = worst(row, side), i = 1;
+    for (; i < items.length; i++) {
+      const next = worst([...row, items[i]], side);
+      if (next > best) break;
+      row.push(items[i]); best = next;
+    }
+    items = items.slice(i);
+    const area = row.reduce((s, r) => s + r.a, 0);
+    if (w >= h) {
+      const cw = items.length ? area / h : w; let cy = y;
+      for (const r of row) { const rh = r.a / cw; out.push({ n: r.n, x, y: cy, w: cw, h: rh }); cy += rh; }
+      x += cw; w -= cw;
+    } else {
+      const rh = items.length ? area / w : h; let cx = x;
+      for (const r of row) { const rw = r.a / rh; out.push({ n: r.n, x: cx, y, w: rw, h: rh }); cx += rw; }
+      y += rh; h -= rh;
+    }
+  }
+  return out;
+}
+
+// ---------- rendering
+const map = $("#map");
+function place(el, r, gap) {
+  el.style.left = r.x + gap + "px"; el.style.top = r.y + gap + "px";
+  el.style.width = Math.max(0, r.w - gap * 2) + "px"; el.style.height = Math.max(0, r.h - gap * 2) + "px";
+}
+function cell(cls, n, r, gap) {
+  const el = document.createElement("div");
+  el.className = "cell " + cls; el._n = n; n._el = el;
+  el.style.setProperty("--c", color(n));
+  place(el, r, gap);
+  return el;
+}
+function drawLeaf(frag, r) {
+  const el = cell("leaf", r.n, r, 1);
+  if (r.w > 42 && r.h > 17) el.innerHTML = `<div class="n">${esc(r.n.name)}</div>` + (r.h > 32 ? `<div class="v">${money(r.n.cur)}${regionOf(r.n) ? " · " + regionOf(r.n) : ""}</div>` : "");
+  frag.append(el);
+}
+function drawGroup(frag, r) {
+  const el = cell("group", r.n, r, 1.5);
+  frag.append(el);
+  if (r.w > 46 && r.h > 40) {
+    el.innerHTML = `<div class="gh"><span class="n">${esc(r.n.name)}</span><span class="v">${money(r.n.cur)}</span></div>`;
+    for (const c of squarify(r.n.children, r.x + 4, r.y + 21, r.w - 8, r.h - 25)) drawLeaf(frag, c);
+  } else if (r.w > 30 && r.h > 16) {
+    el.innerHTML = `<div class="gh"><span class="n">${esc(r.n.name)}</span></div>`;
+  }
+}
+function zoomed() { return state.zoom && root.children.find(g => g.key === state.zoom); }
+
+function render() {
+  const base = zoomed() || root;
+  const W = map.clientWidth, H = map.clientHeight, frag = document.createDocumentFragment();
+  if (!base.children.length) {
+    map.innerHTML = `<div class="empty">${state.filter ? "Nothing matches “" + esc(state.filter) + "”" : "No spend in this period"}</div>`;
+  } else {
+    for (const r of squarify(base.children, 0, 0, W, H)) base === root ? drawGroup(frag, r) : drawLeaf(frag, r);
+    map.replaceChildren(frag);
+  }
+  if (state.sel?._el?.isConnected) state.sel._el.classList.add("sel");
+  renderChrome(base);
+  renderSide();
+}
+
+function renderChrome(base) {
+  const v = DATA.views[state.view], [A, B] = v.dims;
+  document.querySelectorAll("#views button").forEach(b => b.classList.toggle("on", b.dataset.v === state.view));
+  $("#change").checked = state.change;
+  $("#crumbs").innerHTML = `<span>/</span>` + (base === root
+    ? `<span class="cur">all ${DIM[A].many}</span>`
+    : `<a data-up>all ${DIM[A].many}</a><span>/</span><span class="cur">${esc(base.name)}</span>`);
+  const leaves = root.children.reduce((s, g) => s + g.children.length, 0);
+  const legend = state.change
+    ? [["--down", "down"], ["--neutral", "flat"], ["--up", "up / new"]].map(([c, l]) => `<span><i style="background:var(${c})"></i>${l}</span>`).join("")
+    : CATS.map(([k, l]) => `<span><i style="background:var(--${k})"></i>${l}</span>`).join("");
+  $("#sub").innerHTML = `<span><b>${money(root.cur)}</b> · ${period()}</span><span>${root.children.length} ${DIM[A].many} · ${leaves} ${DIM[B].many}</span>
+    ${state.filter ? `<span>filter “${esc(state.filter)}” · ${pct(root.cur / grand)} of bill</span>` : ""}<div class="legend">${legend}</div>`;
+}
+
+function spark(n) {
+  const max = Math.max(...n.daily, 0.0001), bw = 100 / N;
+  const bars = Array.from(n.daily, (v, i) => {
+    const h = Math.max(0, (v / max) * 44);
+    return `<rect x="${(i * bw).toFixed(2)}" y="${(46 - h).toFixed(2)}" width="${(bw * 0.7).toFixed(2)}" height="${h.toFixed(2)}" fill="${i < SPLIT ? "#3a4252" : "var(--accent)"}"/>`;
+  }).join("");
+  return `<div class="spark"><svg viewBox="0 0 100 46" preserveAspectRatio="none">${bars}</svg>
+    <div class="axis"><span>${day(DATA.days[0])}</span><span>previous ${DAYS}d | last ${DAYS}d</span><span>${day(DATA.days[N - 1])}</span></div></div>`;
+}
+
+function renderSide() {
+  const n = state.sel || zoomed() || root;
+  const v = DATA.views[state.view], [A, B] = v.dims;
+  const d = n.cur - n.prev, share = grand > 0 ? n.cur / grand : 0;
+  const change = n.prev < 0.01 ? (n.cur > 0 ? `<b class="upc">new</b>` : "–")
+    : `<b class="${d > 0 ? "upc" : "downc"}">${d > 0 ? "+" : ""}${pct(d / n.prev)}</b> <b style="color:var(--dim)">${d > 0 ? "+" : ""}${money(d)}</b>`;
+  const path = n.kind === "leaf" ? `${n.parent.name} / ${n.full}` : n.kind === "group" ? n.full : `${DIM[A].many} → ${DIM[B].many}`;
+  const kind = n.kind === "root" ? "whole bill" : DIM[n.dim].one;
+  const title = n.kind === "root" ? (state.filter ? `“${state.filter}”` : "Everything") : n.name;
+
+  let html = `<section><div class="h">Selection</div>
+    <div class="sel-name">${esc(title)}</div><div class="sel-path">${esc(path)}</div>
+    <div class="big">${bigMoney(n.cur)}</div><div style="color:var(--dim)">last ${DAYS} days · ${period()}</div>
+    <div class="bar"><i style="width:${Math.min(100, share * 100)}%"></i></div>
+    <div class="stats">
+      <div><span>of bill</span>${pct(share)}</div>
+      <div><span>vs prev ${DAYS}d</span>${change}</div>
+      <div><span>per day</span>${money(n.cur / DAYS)}</div>
+      <div><span>monthly pace</span>${money((n.cur / DAYS) * 30.4)}</div>
+      <div><span>kind</span>${esc(kind)}</div>
+      <div><span>category</span>${n.kind === "root" ? "–" : (CATS.find(c => c[0] === category(n)) || [, "–"])[1]}</div>
+    </div>${spark(n)}</section>`;
+
+  const hints = worthALook();
+  if (hints.length) {
+    const max = Math.max(...hints.map(h => h.n.cur));
+    html += `<section><div class="h">Worth a look <b>${money(hints.reduce((s, h) => s + h.n.cur, 0))}</b></div>` +
+      hints.map((h, i) => `<div class="hint" data-hint="${i}" style="--c:${h.c}">
+        <div class="hn" title="${esc(h.n.full)}">${esc(shortSvc(h.n.parent.key))} · ${esc(h.n.name)}</div><div class="hv">${money(h.n.cur)}</div>
+        <div class="hs" title="${esc(h.why)}">${esc(h.why)}</div><div class="hb"><i style="width:${(h.n.cur / max) * 100}%"></i></div></div>`).join("") +
+      `</section>`;
+  }
+
+  const bill = DATA.bill || {}, types = Object.entries(bill).filter(([, v]) => Math.abs(v) >= 0.005).sort((a, b) => b[1] - a[1]);
+  if (types.length) {
+    const net = types.reduce((s, [, v]) => s + v, 0), gross = types.reduce((s, [, v]) => s + Math.max(v, 0), 0);
+    const credits = -types.reduce((s, [, v]) => s + Math.min(v, 0), 0);
+    html += `<section class="bill"><div class="h">Bill · ${period()}</div>
+      <div class="big">${bigMoney(net)} <small>net</small></div>
+      <div class="bar"><i style="width:${gross ? (net / gross) * 100 : 0}%;background:var(--storage)"></i></div>
+      ${types.map(([k, v]) => `<div class="bill-row"><span>${esc(k.replace(/([a-z])([A-Z])/g, "$1 $2"))}</span><b>${money(v)}</b></div>`).join("")}
+      ${credits ? `<div class="bill-row"><span>credits cover</span><b>${pct(credits / gross)}</b></div>` : ""}</section>`;
+  }
+  $("#side").innerHTML = html;
+}
+
+// ---------- worth a look: known money pits + fastest growers (always from the service view)
+const PITS = (DATA.pits || []).map(([re, why]) => [new RegExp(re), why]); // rules live in awstree.py
+let _hints;
+function worthALook() {
+  if (_hints) return _hints;
+  const t = buildTree("service", ""), leaves = t.children.flatMap(g => g.children), out = [], seen = new Set();
+  const minCost = t.cur * 0.002;
+  for (const n of leaves) {
+    const pit = PITS.find(([re]) => re.test(n.key));
+    if (pit && n.cur >= minCost) { out.push({ n, why: pit[1], c: "var(--accent)" }); seen.add(n); }
+  }
+  for (const n of leaves) {
+    const d = n.cur - n.prev;
+    if (seen.has(n) || d < t.cur * 0.005 || d < 1) continue;
+    const why = n.prev < 0.01 ? "new this period" : `up ${pct(d / n.prev)} (+${money(d)}) vs previous ${DAYS}d`;
+    if (n.prev < 0.01 || d / n.prev > 0.2) out.push({ n, why, c: "var(--up)", d });
+  }
+  const pits = out.filter(h => !h.d).sort((a, b) => b.n.cur - a.n.cur).slice(0, 3);
+  const growers = out.filter(h => h.d).sort((a, b) => b.d - a.d).slice(0, 3);
+  return (_hints = [...growers, ...pits]);
+}
+
+// ---------- interaction
+function setView(v) {
+  if (!DATA.views[v] || v === state.view) return;
+  state.view = v; state.zoom = null; state.sel = null;
+  root = buildTree(v, state.filter); render();
+}
+function select(n) {
+  if (state.sel?._el) state.sel._el.classList.remove("sel");
+  state.sel = n;
+  if (n?._el?.isConnected) n._el.classList.add("sel");
+  renderSide();
+}
+function open(n) {
+  const g = n?.kind === "leaf" ? n.parent : n;
+  if (g?.kind === "group") { state.zoom = g.key; render(); }
+}
+function up() {
+  if (state.zoom) { const g = zoomed(); state.zoom = null; state.sel = g || null; render(); }
+  else if (state.sel) select(null);
+}
+
+map.addEventListener("click", e => { const c = e.target.closest(".cell"); select(c ? c._n : null); });
+map.addEventListener("dblclick", e => { const c = e.target.closest(".cell"); if (c) open(c._n); });
+$("#views").addEventListener("click", e => e.target.dataset.v && setView(e.target.dataset.v));
+$("#change").addEventListener("change", e => { state.change = e.target.checked; render(); });
+$("#crumbs").addEventListener("click", e => { if (e.target.closest("[data-up]")) up(); });
+$("#filter").addEventListener("input", e => {
+  state.filter = e.target.value.trim(); state.sel = null;
+  root = buildTree(state.view, state.filter);
+  if (state.zoom && !zoomed()) state.zoom = null;
+  render();
+});
+$("#side").addEventListener("click", e => {
+  const h = e.target.closest("[data-hint]");
+  if (!h) return;
+  const leaf = worthALook()[+h.dataset.hint].n;
+  state.view = "service"; state.filter = ""; $("#filter").value = "";
+  root = buildTree("service", "");
+  const g = root.children.find(g => g.key === leaf.parent.key);
+  state.zoom = g.key; state.sel = g.children.find(c => c.key === leaf.key) || null;
+  render();
+});
+document.addEventListener("keydown", e => {
+  const typing = e.target === $("#filter");
+  if (e.key === "Escape") {
+    if (typing || state.filter) { $("#filter").value = ""; $("#filter").blur(); if (state.filter) $("#filter").dispatchEvent(new Event("input")); }
+    else up();
+    return;
+  }
+  if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === "/") { e.preventDefault(); $("#filter").focus(); }
+  else if (e.key === "Enter") open(state.sel);
+  else if (e.key === "Backspace") { e.preventDefault(); up(); }
+  else if (e.key === "e" && DATA.export) exportJSON();
+  else if (e.key === "c" || e.key === "t") { state.change = !state.change; render(); }
+  else if (["1", "2", "3"].includes(e.key)) setView(["service", "account", "region"][+e.key - 1]);
+});
+
+function exportJSON() {
+  const blob = new Blob([JSON.stringify(DATA.export, null, 2)], { type: "application/json" });
+  const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: "awstree-export.json" });
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+$("#export").addEventListener("click", exportJSON);
+if (!DATA.export) $("#export").style.display = "none";
+
+const tip = $("#tip");
+map.addEventListener("mousemove", e => {
+  const c = e.target.closest(".cell");
+  if (!c) { tip.style.display = "none"; return; }
+  const n = c._n, d = n.cur - n.prev;
+  const ch = n.prev < 0.01 ? "new" : `${d >= 0 ? "+" : ""}${pct(d / n.prev)} vs prev`;
+  tip.innerHTML = `<div class="t1">${n.kind === "leaf" ? esc(n.parent.name) + " / " : ""}<b>${esc(n.name)}</b></div>
+    <div class="t2">${money(n.cur)} · ${pct(grand ? n.cur / grand : 0)} of bill · ${ch}</div>`;
+  tip.style.display = "block";
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  tip.style.left = Math.min(e.clientX + 14, innerWidth - tw - 8) + "px";
+  tip.style.top = Math.min(e.clientY + 14, innerHeight - th - 8) + "px";
+});
+map.addEventListener("mouseleave", () => (tip.style.display = "none"));
+
+$("#meta").innerHTML = (DATA.demo ? `<span class="badge">demo data</span> ` : "") +
+  `${esc(DATA.metric || "UnblendedCost")} · profile ${esc(DATA.profile || "default")} · read ${esc(DATA.generated || "")}`;
+let raf;
+render();
+new ResizeObserver(() => { cancelAnimationFrame(raf); raf = requestAnimationFrame(render); }).observe(map);
+</script>
+</body>
+</html>

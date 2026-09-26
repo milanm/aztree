@@ -1,0 +1,9 @@
+# Generated output: contains your AWS account IDs and billing data. Never commit it.
+out/
+awstree-data.json
+awstree-export.json
+awstree.html
+
+__pycache__/
+*.pyc
+.DS_Store
