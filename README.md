@@ -23,7 +23,7 @@ The page opens in your browser. It shows the last 30 days, compared with the 30 
 - **Treemap** of spend by service → meter. Press `2` to group by subscription, `3` by region and `4` by resource group → resource.
 - **Color by change** (`c`): red where spend grew, green where it shrank.
 - **Selection panel:** cost, share of the bill, change vs the previous period, monthly pace and a daily chart.
-- **Worth a look:** the fastest-growing costs plus common Azure money pits: Log Analytics ingestion, data transfer out, NAT and Firewall data processing, Basic and static public IPs, disk snapshots, previous-generation VM sizes, Premium v2 App Service plans and Extended Security Updates.
+- **Worth a look:** the fastest-growing costs, plus known Azure money pits (Log Analytics ingestion, data transfer out, NAT and Firewall data processing, Basic and static public IPs, disk snapshots, previous-generation VM sizes, Premium v2 App Service plans and Extended Security Updates).
 - **Biggest drops:** what fell since the previous period, including anything that went to zero, so you can see a saving land.
 - **Advisor:** Azure Advisor's cost recommendations (reservations, savings plans, right-sizing), one per resource and SKU. Click one to jump to the resource or subscription it's about.
 - **Export for AI:** a JSON summary to hand to any AI agent (see below).
@@ -32,9 +32,10 @@ Click to select, double-click to zoom in, `⌫` to go back up, `/` to filter. Ad
 
 ## Requirements
 
-- Python 3.8+ and the [Azure CLI](https://aka.ms/azcli), logged in with `az login`. No CLI? Put a token for `https://management.azure.com/` in `AZURE_ACCESS_TOKEN` and name the subscriptions with `--subscription` or `--all`. A bare token only sees its own tenant; through the CLI, aztree sees every tenant you're logged in to and gets a token for each.
+- Python 3.8+ and the [Azure CLI](https://aka.ms/azcli), logged in with `az login`. Without the CLI, put a token for `https://management.azure.com/` in `AZURE_ACCESS_TOKEN` and name the subscriptions with `--subscription` or `--all`. A bare token only sees its own tenant; through the CLI, aztree sees every tenant you're logged in to and gets a token for each.
 - The **Cost Management Reader** role (or Reader) on each subscription. Advisor tips need Reader; without it you still get the page.
-- Tested on a CSP subscription. On CSP, Azure shows costs at retail prices without your partner's discounts, and reserved usage as $0, so the totals won't match your partner's invoice. Pay-as-you-go and Visual Studio subscriptions use the same API. EA and MCA billing scopes should work through `--scope`, but nobody has tried yet. At such a scope the subscription view shows the whole scope as one box, and Advisor is skipped.
+- Tested on a CSP subscription. On CSP, Azure shows costs at retail prices without your partner's discounts, and reserved usage as $0, so the totals won't match your partner's invoice. Pay-as-you-go and Visual Studio subscriptions use the same API.
+- EA and MCA billing scopes should work through `--scope`, but nobody has tried yet. At such a scope the subscription view shows the whole scope as one box, and Advisor is skipped.
 
 **Cost:** Cost Management queries are free. Azure throttles them per subscription and per tenant, so a run makes about 8–10 requests per subscription and may wait 30–60 seconds when Azure asks it to. aztree saves the data, so reopening the page is instant:
 
@@ -48,7 +49,7 @@ python3 aztree.py --from out/aztree-data.json
 python3 aztree.py --from out/aztree-data.json --export
 ```
 
-This writes `out/aztree-export.json`, a compact summary that includes instructions for the agent. It has totals; breakdowns by service, subscription, region and resource group; every meter with its change vs the previous period; the top growers and drops; credits and refunds; the flagged money pits and the Advisor tips. Give it to an AI agent and ask *"where can I save money?"*. The **Export for AI** button in the page (or `e`) downloads the same file.
+This writes `out/aztree-export.json`, a compact summary that includes instructions for the agent. It has totals, breakdowns by service, subscription, region and resource group, and every meter with its change vs the previous period. It also lists the top growers and drops, credits and refunds, the flagged money pits and the Advisor tips. Give it to an AI agent and ask *"where can I save money?"*. The **Export for AI** button in the page (or `e`) downloads the same file.
 
 ## Options
 
@@ -77,7 +78,7 @@ This writes `out/aztree-export.json`, a compact summary that includes instructio
 
 ## Checking against the portal
 
-In the Azure portal, open **Cost Management → Cost analysis**, choose **Actual cost**, daily granularity and the dates in aztree's header. The totals should match to the cent. If you compare right after a run, Azure may have posted a little more for the last day since.
+In the Azure portal, open **Cost Management → Cost analysis**, choose **Actual cost**, daily granularity and the dates in aztree's header. The totals should match to the cent. Azure can still add a little to the last day after aztree reads it, so compare soon after a run.
 
 ## Privacy
 
