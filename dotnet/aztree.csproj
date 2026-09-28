@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- A dotnet tool for aztree. aztree itself is Python; the release workflow freezes it into one executable per
+       platform (packaging/build_native.py) and puts them in native/<rid>/ before `dotnet pack`. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RollForward>Major</RollForward>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <AssemblyName>aztree</AssemblyName>
+    <RootNamespace>AzTree</RootNamespace>
+
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>aztree</ToolCommandName>
+    <PackageId>aztree</PackageId>
+    <Version>0.0.0</Version> <!-- the release passes the Python version: dotnet pack -p:Version=... -->
+    <Authors>Milan Milanović</Authors>
+    <Description>See where your Azure money goes, as a treemap in one offline HTML page.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/milanm/aztree</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/milanm/aztree</RepositoryUrl>
+    <PackageTags>azure;cost;cost-management;finops;treemap</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+    <!-- ends up in tools/net8.0/any/native/<rid>/ next to the launcher -->
+    <None Include="native/**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

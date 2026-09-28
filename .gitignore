@@ -12,3 +12,10 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+
+# Frozen executables and the dotnet tool build
+build-native/
+dotnet/native/
+dotnet/bin/
+dotnet/obj/
+nupkg/
