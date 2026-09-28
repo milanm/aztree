@@ -10,6 +10,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -325,6 +326,119 @@ def pack(rows):
     return [r for r in out if abs(sum(r["d"])) >= 0.005]
 
 
+# ---------------------------------------------------------------- demo data
+
+P, S, D, X = (f"{c * 8}-{c * 4}-{c * 4}-{c * 4}-{c * 12}" for c in "1234")
+DEMO_SUBS = {P: "acme-prod", S: "acme-staging", D: "acme-data", X: "sandbox-dev"}
+VM, WEB, SQL, STG = ("microsoft.compute/virtualmachines", "microsoft.web/serverfarms", "microsoft.sql/servers",
+                     "microsoft.storage/storageaccounts")
+
+# service, meter, $/day, growth over the 60 days, [(subscription, region, resource group, provider/type/name, share)]
+DEMO = [
+    ("Virtual Machines", "D4s v5", 58, 0.05, [(P, "us east", "rg-app-prod", f"{VM}/vm-app-01", .5),
+                                             (P, "us east", "rg-app-prod", f"{VM}/vm-app-02", .5)]),
+    ("Virtual Machines", "D8s v5", 44, 0.1, [(P, "us east", "mc_rg-aks-prod_aks-prod_eastus",
+                                             "microsoft.compute/virtualmachinescalesets/aks-nodepool1-vmss", 1)]),
+    ("Virtual Machines", "E8s v5", 38, 0, [(D, "eu west", "rg-etl", f"{VM}/vm-etl-worker", 1)]),
+    ("Virtual Machines", "NC6s v3", 22, 0.3, [(D, "us east", "rg-ml", f"{VM}/vm-gpu-train", 1)]),
+    ("Virtual Machines", "D2 v2", 9, 0, [(S, "us east", "rg-legacy", f"{VM}/vm-legacy-ftp", 1)]),
+    ("Azure Kubernetes Service", "Standard Uptime SLA", 2.4, 0, [(P, "us east", "rg-aks-prod",
+                                                                  "microsoft.containerservice/managedclusters/aks-prod", 1)]),
+    ("SQL Database", "vCore", 41, 0, [(P, "us east", "rg-data-prod", f"{SQL}/sql-prod/databases/orders", .7),
+                                      (S, "us east", "rg-data-staging", f"{SQL}/sql-staging/databases/orders", .3)]),
+    ("SQL Database", "RA-GRS Data Stored", 6, 0.03, [(P, "us east", "rg-data-prod", f"{SQL}/sql-prod/databases/orders", 1)]),
+    ("Azure Cosmos DB", "100 RU/s", 19, 1.2, [(P, "us east", "rg-data-prod",
+                                              "microsoft.documentdb/databaseaccounts/cosmos-catalog", 1)]),
+    ("Azure Cosmos DB", "Data Stored", 3, 0.05, [(P, "us east", "rg-data-prod",
+                                                  "microsoft.documentdb/databaseaccounts/cosmos-catalog", 1)]),
+    ("Redis Cache", "C1 Cache Instance", 3.3, 0, [(P, "us east", "rg-app-prod", "microsoft.cache/redis/redis-sessions", 1)]),
+    ("Storage", "Hot LRS Data Stored", 16, 0.04, [(D, "eu west", "rg-lake", f"{STG}/stlakeraw", .8),
+                                                  (P, "us east", "rg-app-prod", f"{STG}/stappassets", .2)]),
+    ("Storage", "Hot LRS Write Operations", 3, 0.1, [(D, "eu west", "rg-lake", f"{STG}/stlakeraw", 1)]),
+    ("Storage", "P30 LRS Disk", 11, 0, [(P, "us east", "rg-app-prod", "microsoft.compute/disks/vm-app-01-data", 1)]),
+    ("Storage", "LRS Snapshots", 7, 0.15, [(P, "us east", "rg-backup", "microsoft.compute/snapshots/snap-vm-app-01-2025", 1)]),
+    ("Log Analytics", "Analytics Logs Data Ingestion", 34, 1.1, [
+        (P, "us east", "rg-monitoring", "microsoft.operationalinsights/workspaces/log-prod", .85),
+        (S, "us east", "rg-monitoring", "microsoft.operationalinsights/workspaces/log-staging", .15)]),
+    ("Azure Monitor", "Standard Web Test Execution", 1.5, 0, [(P, "us east", "rg-monitoring",
+                                                               "microsoft.insights/webtests/ping-home", 1)]),
+    ("Microsoft Defender for Cloud", "Standard Node", 6, 0, [(P, "us east", "", "microsoft.security/pricings/virtualmachines", 1)]),
+    ("Azure App Service", "P1 v3 App", 14, 0, [(P, "us east", "rg-app-prod", f"{WEB}/asp-web-prod", 1)]),
+    ("Azure App Service", "P1 v2 App", 5, 0, [(S, "us east", "rg-app-staging", f"{WEB}/asp-web-staging", 1)]),
+    ("Functions", "Premium vCPU Duration", 8, 0.1, [(P, "us east", "rg-app-prod", f"{WEB}/asp-func-prod", 1)]),
+    ("Bandwidth", "Standard Data Transfer Out", 12, 0.1, [(P, "us east", "rg-app-prod", f"{VM}/vm-app-01", 1)]),
+    ("Bandwidth", "Inter Continent Data Transfer Out - NAM or EU To Any", 4, 0.2, [(D, "eu west", "rg-etl", f"{VM}/vm-etl-worker", 1)]),
+    ("NAT Gateway", "Standard Data Processed", 6, 0.3, [(P, "us east", "rg-network", "microsoft.network/natgateways/ng-prod", 1)]),
+    ("NAT Gateway", "Standard Gateway", 1.1, 0, [(P, "us east", "rg-network", "microsoft.network/natgateways/ng-prod", 1)]),
+    ("Virtual Network", "Standard Private Endpoint", 1.8, 0, [(P, "us east", "rg-network", "microsoft.network/privateendpoints/pe-sql-prod", 1)]),
+    ("Virtual Network", "Standard IPv4 Static Public IP", 1.2, 0, [(P, "us east", "rg-network", "microsoft.network/publicipaddresses/pip-ng-prod", 1)]),
+    ("Virtual Network", "Basic IPv4 Static Public IP", 1.4, 0, [(X, "us west 2", "rg-sandbox", "microsoft.network/publicipaddresses/pip-old-test", 1)]),
+    ("Azure Front Door Service", "Standard Base Fees", 1.2, 0, [(P, "global", "rg-edge", "microsoft.cdn/profiles/afd-web", 1)]),
+    ("Azure Front Door Service", "Standard Data Transfer Out", 4, 0.05, [(P, "global", "rg-edge", "microsoft.cdn/profiles/afd-web", 1)]),
+    ("Foundry Models", "gpt 4.1 Inp glbl Tokens", 6, 3, [(X, "us east 2", "rg-ai-sandbox", "microsoft.cognitiveservices/accounts/oai-sandbox", 1)]),
+    ("Foundry Models", "gpt 4.1 Outp glbl Tokens", 9, 3, [(X, "us east 2", "rg-ai-sandbox", "microsoft.cognitiveservices/accounts/oai-sandbox", 1)]),
+    ("Azure Data Factory v2", "Cloud Data Movement", 5, 0.2, [(D, "eu west", "rg-etl", "microsoft.datafactory/factories/adf-etl", 1)]),
+    ("Event Hubs", "Standard Throughput Unit", 3.6, 0, [(D, "eu west", "rg-etl", "microsoft.eventhub/namespaces/evh-ingest", 1)]),
+    ("Container Registry", "Standard Registry Unit", 0.67, 0, [(P, "us east", "rg-app-prod", "microsoft.containerregistry/registries/acmecr", 1)]),
+    ("Key Vault", "Operations", 0.3, 0, [(P, "us east", "rg-app-prod", "microsoft.keyvault/vaults/kv-app-prod", 1)]),
+]
+
+
+def demo_rid(sub, rg, path):
+    return f"/subscriptions/{sub}/resourcegroups/{rg}/providers/{path}" if rg else f"/subscriptions/{sub}/providers/{path}"
+
+
+def demo_advisor():
+    def rec(problem, sub, path, savings, sku=None, term=None, rg=None):
+        resource = demo_rid(sub, rg, path) if path else f"/subscriptions/{sub}"
+        return {"problem": problem, "solution": problem, "impact": "High", "resource": resource,
+                "resource_name": resource.rsplit("/", 1)[-1] if path else DEMO_SUBS[sub], "resource_type": None,
+                "sku": sku, "term": term, "annual_savings": savings, "currency": "USD", "subscription": DEMO_SUBS[sub]}
+
+    return [
+        rec("Consider SQL PaaS DB reserved instance to save over the pay-as-you-go costs", P, None, 4380.0,
+            "SQL DB Single/Elastic Pool - General Purpose - Gen 5", "P3Y"),
+        rec("Consider purchasing a savings plan to unlock lower prices", P, None, 3120.0, "Compute_Savings_Plan", "P1Y"),
+        rec("Right-size or shutdown underutilized virtual machines", D, f"{VM}/vm-etl-worker", 2150.0, "Standard_E4s_v5", rg="rg-etl"),
+        rec("Consider Cosmos DB reserved instance to save over the pay-as-you-go costs", P, None, 1020.0, "100 RU/s", "P1Y"),
+        rec("Right-size or shutdown underutilized virtual machines", S, f"{VM}/vm-legacy-ftp", 640.0, "Standard_B2s", rg="rg-legacy"),
+    ]
+
+
+def demo(days, today=None):
+    rnd = random.Random(7)
+    end = (today or dt.date.today()) - dt.timedelta(1)
+    n = 2 * days
+    dates = [(end - dt.timedelta(n - 1 - i)).isoformat() for i in range(n)]
+    weekend = [dt.date.fromisoformat(d).weekday() >= 5 for d in dates]
+    rows = {v: {} for v in VIEWS}
+    names = {v: {} for v in VIEWS}
+    names["subscription"] = dict(DEMO_SUBS)
+    for service, meter, per_day, growth, spots in DEMO:
+        bursty = any(w in meter for w in ("Tokens", "Data Transfer", "Ingestion", "Operations", "Processed", "Duration"))
+        for sub, region, rg, path, share in spots:
+            daily = []
+            for i in range(n):
+                m = (1 + growth * i / (n - 1)) / (1 + growth / 2)  # keep the average near per_day
+                m *= 0.8 if bursty and weekend[i] else 1
+                daily.append(max(0.0, per_day * share * m * rnd.gauss(1, 0.06)))
+            rid = demo_rid(sub, rg, path)
+            gkey = group_key({"scope": f"/subscriptions/{sub}"}, rg, rid)
+            names["resource"][gkey] = f"{rg or '(no resource group)'} · {DEMO_SUBS[sub]}"
+            for view, key in (("service", (service, meter)), ("subscription", (sub, service)),
+                              ("region", (region, service)), ("resource", (gkey, rid))):
+                acc = rows[view].setdefault(key, [0.0] * n)
+                for i, v in enumerate(daily):
+                    acc[i] += v
+    return {
+        "days": dates, "split": days,
+        "views": {v: {"dims": VIEWS[v], "names": names[v], "rows": pack(rows[v])} for v in VIEWS},
+        "currency": "USD",
+        "subscriptions": [{"id": k, "name": v, "currency": "USD"} for k, v in DEMO_SUBS.items()],
+        "resource_fallback": [], "advisor": demo_advisor(), "advisor_error": None, "demo": True,
+    }
+
+
 # ---------------------------------------------------------------- worth a look
 
 # Known money pits: (service pattern, meter pattern, why). First match wins. Shared with the viewer's
@@ -537,6 +651,7 @@ def main(argv=None):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="replace")
     ap = argparse.ArgumentParser(description="See where your Azure money goes, as a treemap.")
+    ap.add_argument("--demo", action="store_true", help="use fake data (no Azure access needed)")
     who = ap.add_mutually_exclusive_group()
     who.add_argument("--subscription", action="append", default=[], metavar="ID_OR_NAME",
                      help="subscription to read, repeat for more (default: the Azure CLI's current one)")
@@ -559,6 +674,9 @@ def main(argv=None):
 
     if args.source:
         data = json.loads(Path(args.source).read_text(encoding="utf-8"))
+    elif args.demo:
+        data = demo(args.days)
+        data.update(generated=dt.datetime.now().strftime("%Y-%m-%d %H:%M"), metric=args.metric)
     else:
         try:
             az = Azure(get_token(), verbose=args.verbose)

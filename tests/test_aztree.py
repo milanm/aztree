@@ -771,6 +771,61 @@ class TargetsTest(unittest.TestCase):
         self.assertEqual(targets, [{"id": "aaaa-1", "name": "acme-prod", "scope": "/subscriptions/aaaa-1"}])
 
 
+class DemoTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.data = aztree.demo(30, today=TODAY)
+        cls.summary = aztree.summarize(cls.data)
+
+    def test_same_shape_as_real_data(self):
+        self.assertEqual(set(self.data["views"]), set(aztree.VIEWS))
+        for v, dims in aztree.VIEWS.items():
+            self.assertEqual(self.data["views"][v]["dims"], dims)
+        self.assertEqual(len(self.data["days"]), 60)
+        self.assertEqual(self.data["days"][-1], "2026-09-27")
+        self.assertTrue(self.data["demo"])
+
+    def test_every_view_adds_up_to_the_same_bill(self):
+        totals = {v: round(sum(sum(r["d"]) for r in view["rows"]), 2) for v, view in self.data["views"].items()}
+        self.assertEqual(len(set(totals.values())), 1, totals)
+
+    def test_ids_are_obviously_fake(self):
+        for s in self.data["subscriptions"]:
+            self.assertRegex(s["id"], r"^(\d)\1{7}-")
+
+    def test_has_growers_over_forty_percent(self):
+        big = [g for g in self.summary["top_growers"] if (g["change_pct"] or 0) >= 40]
+        self.assertGreaterEqual(len({g["service"] for g in big}), 2)
+
+    def test_trips_the_azure_rules(self):
+        flagged = {f["meter"] for f in self.summary["flags"]}
+        for meter in ("D2 v2", "Basic IPv4 Static Public IP", "Analytics Logs Data Ingestion", "P1 v2 App", "LRS Snapshots"):
+            self.assertIn(meter, flagged)
+
+    def test_has_advisor_tips_pointing_at_demo_resources(self):
+        recs = self.data["advisor"]
+        self.assertGreaterEqual(len(recs), 3)
+        leaves = {r["k"][1] for r in self.data["views"]["resource"]["rows"]}
+        self.assertTrue(any(r["resource"] in leaves for r in recs))
+
+    def test_is_repeatable(self):
+        self.assertEqual(aztree.demo(30, today=TODAY), self.data)
+
+    def test_main_demo_needs_no_azure(self):
+        import tempfile
+        page = Path(tempfile.mkdtemp()) / "demo.html"
+        real = aztree.get_token
+        aztree.get_token = lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not call Azure"))
+        try:
+            with redirect_stderr(io.StringIO()):
+                from contextlib import redirect_stdout
+                with redirect_stdout(io.StringIO()):
+                    aztree.main(["--demo", "--out", str(page), "--no-open"])
+        finally:
+            aztree.get_token = real
+        self.assertIn('"demo":true', page.read_text(encoding="utf-8"))
+
+
 class ExplainTest(unittest.TestCase):
     def test_403_mentions_cost_management_reader(self):
         self.assertIn("Cost Management Reader", aztree.explain(aztree.AzureError(403, "denied")))
