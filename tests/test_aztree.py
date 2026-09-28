@@ -891,7 +891,77 @@ class SummarizeTest(unittest.TestCase):
             self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["line_items"][0]["meter"], "Snapshots · Zürich")
 
 
-TEMPLATE = (REPO / "aztree" / "viewer.html").read_text(encoding="utf-8")
+class IdleHintsTest(unittest.TestCase):
+    DISK, DISK2 = RG + "/providers/microsoft.compute/disks/d1", RG + "/providers/microsoft.compute/disks/d2"
+    IP = RG + "/providers/microsoft.network/publicipaddresses/ip1"
+
+    def data(self, graph, **extra):
+        rows = [(RG, self.DISK, [1, 1, 1, 2, 2, 2]), (RG, self.DISK2, [1] * 6), (RG, self.IP, [0.1] * 6)]
+        return make_data([("Storage", "LRS", [5] * 6)], resource_rows=rows, graph=graph, **extra)
+
+    def finding(self, check, rid):
+        return {"check": check, "id": rid, "name": rid.rsplit("/", 1)[-1], "resourceGroup": "rg-app", "subscriptionId": "aaaa-1"}
+
+    def idle(self, data):
+        return [h for h in aztree.summarize(data)["hints"] if h["kind"] == "idle"]
+
+    def test_one_hint_per_check_with_what_it_cost(self):
+        (h,) = self.idle(self.data([self.finding("unattached-disk", self.DISK), self.finding("unattached-disk", self.DISK2)]))
+        self.assertEqual((h["check"], h["label"], h["amount"], h["current"]), ("unattached-disk", "2 unattached disks", 9.0, 9.0))
+        self.assertEqual(h["resources"], [{"id": self.DISK, "name": "d1", "group": RG, "current": 6.0},
+                                          {"id": self.DISK2, "name": "d2", "group": RG, "current": 3.0}])
+        self.assertIn("d1", h["reason"])  # the biggest: where a click goes
+
+    def test_a_single_resource_is_named(self):
+        (h,) = self.idle(self.data([self.finding("unattached-disk", self.DISK)]))
+        self.assertEqual(h["label"], "d1")
+        self.assertTrue(h["reason"].startswith("unattached disk: "), h["reason"])
+
+    def test_what_costs_nothing_is_left_out(self):
+        free = RG + "/providers/microsoft.web/serverfarms/free-plan"  # no cost row: a free plan isn't money
+        self.assertEqual(self.idle(self.data([self.finding("empty-plan", free)])), [])
+
+    def test_pennies_are_not_a_hint(self):
+        self.assertEqual(self.idle(self.data([self.finding("unused-ip", self.IP)])), [])  # $0.30 this period
+
+    def test_unknown_checks_are_ignored(self):
+        self.assertEqual(self.idle(self.data([self.finding("something-new", self.DISK)])), [])
+
+    def test_they_sort_with_the_other_to_dos(self):
+        data = self.data([self.finding("unattached-disk", self.DISK)])
+        data["views"]["service"]["rows"].append({"k": ["Log Analytics", "Analytics Logs Data Ingestion"], "d": [1] * 6})
+        kinds = [h["kind"] for h in aztree.summarize(data)["hints"] if h["kind"] in ("pit", "idle")]
+        self.assertEqual(kinds, ["idle", "pit"])  # $6 of disk before $3 of ingestion
+
+    def test_old_saved_data_has_no_idle_hints(self):
+        self.assertEqual(self.idle(BASIC), [])  # runs saved by 0.3.0 have no "graph" key
+
+
+class Batch4ExportTest(unittest.TestCase):
+    def test_by_tag_names_the_tag_and_its_untagged_spend(self):
+        data = make_data([("Storage", "LRS", [5] * 6)])
+        data["views"]["tag"] = {"dims": ["TagValue", "ServiceName"], "names": {}, "tag": "environment",
+                                "rows": [{"k": ["prod", "Storage"], "d": [4] * 6}, {"k": ["", "Storage"], "d": [1] * 6}]}
+        s = aztree.summarize(data)
+        self.assertEqual(s["tag"], "environment")
+        self.assertEqual([(t["value"], t["current"]) for t in s["by_tag"]], [("prod", 12.0), ("(untagged)", 3.0)])
+        self.assertEqual(s["by_tag"][0]["services"][0]["service"], "Storage")
+
+    def test_forecast_and_graph_status_are_passed_on(self):
+        f = {"month": "2026-09", "actual": 150.0, "forecast": 85.0, "total": 235.0}
+        s = aztree.summarize(make_data([("Storage", "LRS", [5] * 6)], forecast=f, graph_error="HTTP 403"))
+        self.assertEqual((s["forecast"], s["graph_error"]), (f, "HTTP 403"))
+
+    def test_old_saved_data_still_exports(self):
+        s = aztree.summarize(BASIC)
+        self.assertEqual((s["tag"], s["by_tag"], s["forecast"], s["graph_error"]), (None, None, None, None))
+
+    def test_instructions_explain_the_new_fields(self):
+        for word in ("by_tag", "(untagged)", "forecast", "Resource Graph", "idle"):
+            self.assertIn(word, aztree.AI_INSTRUCTIONS)
+
+
+TEMPLATE =(REPO / "aztree" / "viewer.html").read_text(encoding="utf-8")
 
 # Runs the viewer's script in Node against a bare-bones DOM: enough to prove each view draws boxes
 # and fills the side panel, without a browser.

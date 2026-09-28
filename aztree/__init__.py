@@ -774,12 +774,17 @@ AI_INSTRUCTIONS = (
     "Line items are Azure meters grouped by service; `totals.credits_and_refunds` is the part of `current` that comes "
     "from negative line items (credits, refunds). `flags` are known cost traps matched on meter names. `hints` is the "
     "list the page shows under Worth a look: news (growers, one-off spikes) taking turns with to-dos (money pits, "
-    "always-on compute in dev/test groups, steady spend worth committing). `advisor` holds "
+    "always-on compute in dev/test groups, idle resources, steady spend worth committing). `advisor` holds "
     "Azure Advisor's cost recommendations, one per kind, resource and SKU, with the largest annual saving Advisor "
     "reported; recommendations that cover the same usage (a reservation and a savings plan, a 1-year and a 3-year term) "
     "are alternatives, not additive. A tip's `covers` lists the meters its reservation or savings plan would cover, "
     "matched across the whole bill, so in a multi-subscription export it can include other subscriptions' usage. "
-    "Please: 1) explain what drives the cost, 2) explain notable changes vs the previous period, "
+    "`by_tag` splits the bill by the values of the tag named in `tag`; \"(untagged)\" is spend on resources without "
+    "it. `forecast` is Azure's own forecast for the current calendar month: `actual` is billed so far, `forecast` is "
+    "still to come and `total` is both. Hints of kind `idle` are resources Azure Resource Graph found billing while "
+    "doing nothing (VMs stopped but still allocated, unattached disks, unused public IPs, snapshots older than 90 "
+    "days, App Service plans with no apps, NAT gateways on no subnet), with what they cost in the current period. "
+    "Please:1) explain what drives the cost, 2) explain notable changes vs the previous period, "
     "3) suggest concrete savings, each with an estimated monthly saving and how to verify it. "
     "Levers to consider: reservations and savings plans for steady compute and databases; Azure Hybrid Benefit for "
     "Windows Server and SQL Server licenses already owned; dev/test pricing for non-production subscriptions; "
@@ -911,6 +916,49 @@ def steady(data, line_keys, n):
             for svc, s in by_service.items() if s["current"] / n * 30.4 >= 100]
 
 
+# Resource Graph checks (see IDLE_QUERY): what one is called, what several are called, and what to do
+IDLE = {
+    "stopped-vm": ("stopped VM", "stopped VMs",
+                   "stopped from inside the OS but still allocated, so compute keeps billing; Stop in the portal deallocates"),
+    "unattached-disk": ("unattached disk", "unattached disks", "attached to no VM; snapshot what you need, then delete"),
+    "unused-ip": ("unused public IP", "unused public IPs",
+                  "attached to nothing, and public IPs bill by the hour; release what nothing uses"),
+    "old-snapshot": ("old snapshot", "old snapshots", "older than 90 days; delete what no restore plan needs"),
+    "empty-plan": ("empty App Service plan", "empty App Service plans",
+                   "no apps, but a plan bills by the hour whether used or not; delete or scale down"),
+    "lonely-nat": ("unused NAT gateway", "unused NAT gateways", "on no subnet, so routing nothing, but billed by the hour"),
+}
+IDLE_FLOOR = 1.0  # dollars over the period: a check that costs less isn't worth a line
+
+
+def idle(data):
+    """Resource Graph's findings with what each cost this period (from the resource view): one hint per check,
+    biggest resource first. What cost nothing is left out: a free empty plan or a $0 IP isn't money."""
+    split, cost, group = data["split"], {}, {}
+    for r in data["views"]["resource"]["rows"]:
+        key, rid = r["k"]
+        cost[rid] = cost.get(rid, 0.0) + sum(r["d"][split:])
+        group[rid] = key
+    checks = {}
+    for f in data.get("graph") or []:
+        rid = (f.get("id") or "").lower()
+        if f.get("check") in IDLE and cost.get(rid, 0.0) >= 0.005:
+            checks.setdefault(f["check"], []).append({"id": rid, "name": f.get("name") or rid.rsplit("/", 1)[-1],
+                                                      "group": group[rid], "current": round(cost[rid], 2)})
+    hints = []
+    for check, found in checks.items():
+        total = round(sum(x["current"] for x in found), 2)
+        if total < IDLE_FLOOR:
+            continue
+        one, many, why = IDLE[check]
+        found.sort(key=lambda x: -x["current"])
+        single = len(found) == 1
+        hints.append({"kind": "idle", "check": check, "label": found[0]["name"] if single else f"{len(found)} {many}",
+                      "reason": f"{one}: {why}" if single else f"{why}; biggest: {found[0]['name']}",
+                      "resources": found, "current": total, "amount": total})
+    return hints
+
+
 def summarize(data):
     """Turn the raw daily data into a compact JSON an AI agent can reason about."""
     days, split = data["days"], data["split"]
@@ -1004,7 +1052,7 @@ def summarize(data):
     advisor_has_commitments = bool(advisor) and not data.get("advisor_error") and any(commitment_kinds(r) for r in advisor)
     if not advisor_has_commitments and data.get("metric") != "AmortizedCost":  # amortized, reserved usage looks flat too
         todos += steady(data, {(x["service"], x["meter"]) for x in line_items}, n)
-    todos = sorted(todos + always_on(data, max(10, grand * 0.002)), key=lambda h: -h["amount"])
+    todos = sorted(todos + always_on(data, max(10, grand * 0.002)) + idle(data), key=lambda h: -h["amount"])
     flagged = {(f["service"], f["meter"]) for f in flags}
     news = sorted([*spiked.values(), *(hint("grower", x, x["change"]) for x in growing
                                        if (x["service"], x["meter"]) not in flagged | set(spiked))],
@@ -1015,6 +1063,11 @@ def summarize(data):
     for r in data["views"]["service"]["rows"]:
         for i, v in enumerate(r["d"]):
             daily[i] += v
+
+    tag_view = data["views"].get("tag")
+    by_tag = breakdown("tag", "value", "service") if tag_view else None
+    for row in by_tag or []:
+        row["value"] = row["value"] or "(untagged)"
 
     return {
         "tool": "aztree",
@@ -1035,12 +1088,16 @@ def summarize(data):
         "by_region": breakdown("region", "region", "service"),
         "by_resource_group": breakdown("resource", "resource_group", "resource_id", "resources",
                                        label=lambda k, names: names.get(k, k), limit=TOP_RESOURCES),
+        "tag": tag_view["tag"] if tag_view else None,
+        "by_tag": by_tag,
         "top_growers": growers,
         "top_drops": drops,
         "flags": flags,
         "hints": hints,
         "advisor": advisor,
         "advisor_error": data.get("advisor_error"),
+        "graph_error": data.get("graph_error"),
+        "forecast": data.get("forecast"),
         "line_items": line_items,
         "daily_totals": [{"date": d, "cost": money(v)} for d, v in zip(days, daily)],
     }
