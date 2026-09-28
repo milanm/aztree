@@ -10,11 +10,12 @@ It's one small Python package with no dependencies, and it produces a single HTM
 
 ## Quick start
 
-Install it with Python or with .NET:
+Install it with Python, .NET or Homebrew:
 
 ```bash
 pipx install aztree              # Python 3.9+ (or: pip install aztree)
 dotnet tool install -g aztree    # .NET 8 or later, no Python needed
+brew install milanm/tap/aztree   # macOS and Linux, no Python needed
 ```
 
 Or download the executable for your system from the [latest release](https://github.com/milanm/aztree/releases/latest): Windows, Linux or macOS, no Python needed. The downloads aren't signed yet, so Windows and macOS ask once before running them. On Linux and macOS, run `chmod +x` on the file first.

@@ -117,3 +117,17 @@ jobs:
         with:
           user: ${{ vars.NUGET_USER }}
       - run: dotnet nuget push nupkg/*.nupkg --api-key ${{ steps.login.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+  winget:
+    # opens the winget-pkgs pull request for each new version, from milanm's fork of winget-pkgs;
+    # needs a classic token with public_repo scope in the WINGET_TOKEN secret, and skips itself without one
+    needs: github-release
+    runs-on: ubuntu-latest
+    env:
+      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+    steps:
+      - uses: vedantmgoyal9/winget-releaser@v2
+        if: env.WINGET_TOKEN != ''
+        with:
+          identifier: MilanMilanovic.AzTree
+          installers-regex: 'aztree-win-x64\.exe$'
+          token: ${{ secrets.WINGET_TOKEN }}
