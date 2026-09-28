@@ -6,18 +6,31 @@
 
 Needs a logged-in Azure CLI (`az login`), or a token in AZURE_ACCESS_TOKEN. No other dependencies.
 """
+import datetime as dt
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+from collections import Counter
 
 ARM = "https://management.azure.com"
 API_VERSION = "2025-03-01"  # Microsoft.CostManagement/query
 MAX_TRIES = 8  # per request, when Cost Management throttles us
+MAX_RESOURCE_PAGES = 10  # past this, the resource view drops from single resources to services
+
+# Each view is outer box -> inner box. A query can group by two dimensions at most, so the
+# subscription view is not queried: every query runs per subscription and call 1 feeds it too.
+VIEWS = {
+    "service": ["ServiceName", "Meter"],
+    "subscription": ["SubscriptionId", "ServiceName"],
+    "region": ["ResourceLocation", "ServiceName"],
+    "resource": ["ResourceGroupName", "ResourceId"],
+}
 
 
 def die(msg):
@@ -122,6 +135,112 @@ def query(az, scope, start, end, groupings, metric, aggs=("Cost", "CostUSD"), ma
         rows += [dict(zip(cols, r)) for r in props.get("rows", [])]
         url = props.get("nextLink")
     return rows
+
+
+# ---------------------------------------------------------------- reading costs
+
+def subscription_target(sub):
+    return {"id": sub["id"], "name": sub["name"], "scope": f"/subscriptions/{sub['id']}"}
+
+
+def scope_target(scope):
+    scope = "/" + scope.strip("/")
+    return {"id": scope, "name": scope, "scope": scope}
+
+
+def usage_day(v):
+    """UsageDate arrives as 20260930 (a number) or as '2026-09-30T00:00:00'. Return 'yyyymmdd'."""
+    s = str(v)
+    return s[:10].replace("-", "") if "-" in s else s[:8]
+
+
+def group_key(target, rg, resource_id):
+    """The resource group's ARM id, or the subscription's for resources outside any group.
+    Keying on the id keeps two `rg-app` groups in different subscriptions apart."""
+    m = re.match(r"/subscriptions/[^/]+", resource_id or "", re.I)
+    sub = m.group(0).lower() if m else target["scope"].lower()
+    return f"{sub}/resourcegroups/{rg.lower()}" if rg else sub
+
+
+def fetch(az, targets, days, metric, advisor=True, log=print, today=None):
+    end = (today or dt.date.today()) - dt.timedelta(1)  # through yesterday: today is still arriving
+    start = end - dt.timedelta(2 * days - 1)  # current window + previous window, for the "vs prev" deltas
+    dates = [(start + dt.timedelta(i)).isoformat() for i in range(2 * days)]
+    index = {d.replace("-", ""): i for i, d in enumerate(dates)}
+    raw = {v: [] for v in VIEWS}  # (key, day index, cost, cost in USD), folded once the currency is known
+    names = {v: {} for v in VIEWS}
+    aggs = ["Cost", "CostUSD"]
+    subs, fallback = [], []
+
+    def run(target, groupings, **kw):
+        nonlocal aggs
+        try:
+            return query(az, target["scope"], dates[0], dates[-1], groupings, metric, aggs, **kw)
+        except AzureError as e:
+            if e.status != 400 or len(aggs) == 1:
+                raise
+            aggs = ["Cost"]  # this scope can't report USD: billing currency only from here on
+            return query(az, target["scope"], dates[0], dates[-1], groupings, metric, aggs, **kw)
+
+    def add(view, key, r):
+        i = index.get(usage_day(r.get("UsageDate")))
+        if i is not None:
+            raw[view].append((key, i, r.get("Cost") or 0.0, r.get("CostUSD")))
+
+    for t in targets:
+        log(f"  {t['name']}: services ...")
+        currencies = Counter()
+        for r in run(t, VIEWS["service"]):
+            currencies[r.get("Currency")] += 1
+            add("service", (r["ServiceName"], r.get("Meter") or "(no meter)"), r)
+            add("subscription", (t["id"], r["ServiceName"]), r)
+        names["subscription"][t["id"]] = t["name"]
+
+        log(f"  {t['name']}: resources ...")
+        try:
+            rows, leaf = run(t, VIEWS["resource"], max_pages=MAX_RESOURCE_PAGES), "ResourceId"
+        except TooManyPages:
+            log(f"  {t['name']}: too many resources to list one by one, grouping them by service instead")
+            rows, leaf = run(t, ["ResourceGroupName", "ServiceName"]), "ServiceName"
+            fallback.append(t["name"])
+        for r in rows:
+            rg, rid = r.get("ResourceGroupName") or "", (r.get("ResourceId") or "").lower()
+            key = group_key(t, rg, rid)
+            label = rg or "(no resource group)"
+            names["resource"][key] = f"{label} · {t['name']}" if len(targets) > 1 else label
+            add("resource", (key, (rid or "(no resource)") if leaf == "ResourceId" else r["ServiceName"]), r)
+
+        log(f"  {t['name']}: regions ...")
+        for r in run(t, VIEWS["region"]):
+            add("region", ((r.get("ResourceLocation") or "").lower(), r["ServiceName"]), r)
+        subs.append({"id": t["id"], "name": t["name"], "currency": next((c for c, _ in currencies.most_common() if c), None)})
+
+    found = {s["currency"] for s in subs if s["currency"]}
+    usd = len(found) > 1 and "CostUSD" in aggs
+    if len(found) > 1 and not usd:
+        log("  warning: these subscriptions bill in different currencies and Azure won't convert them; totals mix currencies")
+    log(f"  done: {az.requests} requests (Cost Management queries are free)")
+    return {
+        "days": dates, "split": days,
+        "views": {v: {"dims": dims, "names": names[v], "rows": fold(raw[v], len(dates), usd)} for v, dims in VIEWS.items()},
+        "currency": "USD" if usd or not found else min(found),
+        "subscriptions": subs, "resource_fallback": fallback, "advisor": None, "demo": False,
+    }
+
+
+def fold(entries, n, usd):
+    """(key, day, cost, cost_usd) entries -> packed rows of daily totals, in one currency."""
+    rows = {}
+    for key, i, cost, cost_usd in entries:
+        amount = (cost_usd or 0.0) if usd else cost
+        if amount:
+            rows.setdefault(key, [0.0] * n)[i] += amount
+    return pack(rows)
+
+
+def pack(rows):
+    out = [{"k": list(k), "d": [round(v, 4) for v in d]} for k, d in rows.items()]
+    return [r for r in out if abs(sum(r["d"])) >= 0.005]
 
 
 # ---------------------------------------------------------------- auth and subscriptions

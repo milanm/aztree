@@ -208,6 +208,145 @@ class ListSubscriptionsTest(unittest.TestCase):
         self.assertEqual(send.calls[0]["method"], "GET")
 
 
+TODAY = aztree.dt.date(2026, 9, 28)  # with days=3 the window is Sep 22..27, split after Sep 24
+
+
+class Router:
+    """Fake Cost Management: answers each query from `tables[(dim1, dim2)][scope]`, a list of
+    (usage_date, value1, value2, cost, currency, cost_usd) tuples."""
+
+    def __init__(self, tables, explode=(), reject_usd=False):
+        self.tables, self.explode, self.reject_usd = tables, explode, reject_usd
+        self.bodies = []
+
+    def __call__(self, method, url, data, headers):
+        body = json.loads(data)
+        self.bodies.append(body)
+        dims = tuple(g["name"] for g in body["dataset"]["grouping"])
+        aggs = [a["name"] for a in body["dataset"]["aggregation"].values()]
+        if self.reject_usd and "CostUSD" in aggs:
+            return error(400, "BadRequest", "Invalid aggregation CostUSD")
+        scope = url.split("/providers/Microsoft.CostManagement")[0][len(aztree.ARM):]
+        if dims in self.explode:
+            return page(["Cost"], [], next_link=url.split("&")[0] + "&$skiptoken=more")
+        cols = aggs + ["UsageDate", *dims, "Currency"]
+        rows = []
+        for date, a, b, cost, cur, usd in self.tables.get(dims, {}).get(scope, []):
+            vals = {"Cost": cost, "CostUSD": usd if usd is not None else cost, "UsageDate": date,
+                    dims[0]: a, dims[1]: b, "Currency": cur}
+            rows.append([vals[c] for c in cols])
+        return page(cols, rows)
+
+
+RID = "/subscriptions/aaaa-1/resourcegroups/rg-app/providers/microsoft.web/sites/shop"
+ONE_SUB = {
+    ("ServiceName", "Meter"): {"/subscriptions/aaaa-1": [
+        (20260922, "Storage", "Hot LRS Data Stored", 1.0, "USD", None),
+        (20260927, "Storage", "Hot LRS Data Stored", 2.0, "USD", None),
+        (20260925, "Azure App Service", "P1 v3 App", 5.0, "USD", None),
+        (20260901, "Azure App Service", "P1 v3 App", 99.0, "USD", None),  # outside the window
+    ]},
+    ("ResourceGroupName", "ResourceId"): {"/subscriptions/aaaa-1": [
+        (20260925, "rg-app", RID, 5.0, "USD", None),
+        (20260927, "", "/subscriptions/aaaa-1/providers/microsoft.visualstudio/account/x", 2.0, "USD", None),
+    ]},
+    ("ResourceLocation", "ServiceName"): {"/subscriptions/aaaa-1": [
+        (20260925, "us central", "Azure App Service", 5.0, "USD", None),
+    ]},
+}
+PROD = {"id": "aaaa-1", "name": "acme-prod"}
+DEV = {"id": "bbbb-2", "name": "acme-dev"}
+
+
+def fetch(tables, targets=(PROD,), **kw):
+    router = Router(tables, **{k: kw.pop(k) for k in ("explode", "reject_usd") if k in kw})
+    data = aztree.fetch(client(router), [aztree.subscription_target(t) for t in targets], 3, "ActualCost",
+                        advisor=False, log=lambda *a: None, today=TODAY)
+    return data, router
+
+
+def rows_of(data, view):
+    return {tuple(r["k"]): r["d"] for r in data["views"][view]["rows"]}
+
+
+class FetchTest(unittest.TestCase):
+    def test_window_is_two_periods_ending_yesterday(self):
+        data, router = fetch(ONE_SUB)
+        self.assertEqual(data["days"], ["2026-09-22", "2026-09-23", "2026-09-24", "2026-09-25", "2026-09-26", "2026-09-27"])
+        self.assertEqual(data["split"], 3)
+        self.assertEqual(router.bodies[0]["timePeriod"], {"from": "2026-09-22T00:00:00Z", "to": "2026-09-27T23:59:59Z"})
+
+    def test_service_view_places_costs_on_their_day(self):
+        data, _ = fetch(ONE_SUB)
+        rows = rows_of(data, "service")
+        self.assertEqual(rows[("Storage", "Hot LRS Data Stored")], [1.0, 0, 0, 0, 0, 2.0])
+        self.assertEqual(rows[("Azure App Service", "P1 v3 App")], [0, 0, 0, 5.0, 0, 0])  # the Sep 1 row is dropped
+        self.assertEqual(data["views"]["service"]["dims"], ["ServiceName", "Meter"])
+
+    def test_subscription_view_comes_from_the_service_query(self):
+        data, router = fetch(ONE_SUB)
+        self.assertEqual(sorted(rows_of(data, "subscription")), [("aaaa-1", "Azure App Service"), ("aaaa-1", "Storage")])
+        self.assertEqual(data["views"]["subscription"]["names"], {"aaaa-1": "acme-prod"})
+        self.assertEqual(len(router.bodies), 3)  # service, resource and region queries only
+
+    def test_region_view(self):
+        data, _ = fetch(ONE_SUB)
+        self.assertEqual(list(rows_of(data, "region")), [("us central", "Azure App Service")])
+
+    def test_resource_view_keys_groups_by_their_arm_id(self):
+        data, _ = fetch(ONE_SUB)
+        view = data["views"]["resource"]
+        rows = rows_of(data, "resource")
+        self.assertIn(("/subscriptions/aaaa-1/resourcegroups/rg-app", RID), rows)
+        self.assertEqual(view["names"]["/subscriptions/aaaa-1/resourcegroups/rg-app"], "rg-app")
+        self.assertEqual(view["names"]["/subscriptions/aaaa-1"], "(no resource group)")
+
+    def test_same_group_name_in_two_subscriptions_stays_apart(self):
+        tables = {
+            ("ServiceName", "Meter"): {},
+            ("ResourceLocation", "ServiceName"): {},
+            ("ResourceGroupName", "ResourceId"): {
+                "/subscriptions/aaaa-1": [(20260925, "rg-app", RID, 1.0, "USD", None)],
+                "/subscriptions/bbbb-2": [(20260925, "rg-app", RID.replace("aaaa-1", "bbbb-2"), 1.0, "USD", None)],
+            },
+        }
+        data, _ = fetch(tables, targets=(PROD, DEV))
+        names = data["views"]["resource"]["names"]
+        self.assertEqual(names["/subscriptions/aaaa-1/resourcegroups/rg-app"], "rg-app · acme-prod")
+        self.assertEqual(names["/subscriptions/bbbb-2/resourcegroups/rg-app"], "rg-app · acme-dev")
+
+    def test_resource_view_falls_back_to_services_when_paging_explodes(self):
+        tables = dict(ONE_SUB)
+        tables[("ResourceGroupName", "ServiceName")] = {"/subscriptions/aaaa-1": [
+            (20260925, "rg-app", "Azure App Service", 5.0, "USD", None)]}
+        data, _ = fetch(tables, explode={("ResourceGroupName", "ResourceId")})
+        self.assertEqual(list(rows_of(data, "resource")), [("/subscriptions/aaaa-1/resourcegroups/rg-app", "Azure App Service")])
+        self.assertEqual(data["resource_fallback"], ["acme-prod"])
+
+    def test_one_currency_is_drawn_in_that_currency(self):
+        tables = {("ServiceName", "Meter"): {"/subscriptions/aaaa-1": [(20260925, "Storage", "LRS", 10.0, "EUR", 11.0)]}}
+        data, _ = fetch(tables)
+        self.assertEqual(data["currency"], "EUR")
+        self.assertEqual(rows_of(data, "service")[("Storage", "LRS")][3], 10.0)
+
+    def test_mixed_currencies_are_drawn_in_usd(self):
+        tables = {("ServiceName", "Meter"): {
+            "/subscriptions/aaaa-1": [(20260925, "Storage", "LRS", 10.0, "EUR", 11.0)],
+            "/subscriptions/bbbb-2": [(20260925, "Storage", "LRS", 5.0, "USD", 5.0)],
+        }}
+        data, _ = fetch(tables, targets=(PROD, DEV))
+        self.assertEqual(data["currency"], "USD")
+        self.assertEqual(rows_of(data, "service")[("Storage", "LRS")][3], 16.0)
+        self.assertEqual({s["name"]: s["currency"] for s in data["subscriptions"]}, {"acme-prod": "EUR", "acme-dev": "USD"})
+
+    def test_rejected_costusd_is_dropped_once(self):
+        data, router = fetch(ONE_SUB, reject_usd=True)
+        aggs = [[a["name"] for a in b["dataset"]["aggregation"].values()] for b in router.bodies]
+        self.assertEqual(aggs[0], ["Cost", "CostUSD"])
+        self.assertTrue(all(a == ["Cost"] for a in aggs[1:]))
+        self.assertIn(("Storage", "Hot LRS Data Stored"), rows_of(data, "service"))
+
+
 class ExplainTest(unittest.TestCase):
     def test_403_mentions_cost_management_reader(self):
         self.assertIn("Cost Management Reader", aztree.explain(aztree.AzureError(403, "denied")))
