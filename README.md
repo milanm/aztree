@@ -8,12 +8,22 @@ It's one small Python package with no dependencies, and it produces a single HTM
 
 ## Quick start
 
+Install it with Python or with .NET:
+
 ```bash
-pipx install aztree         # or: pip install aztree
-aztree --demo               # try it with fake data, no Azure needed
+pipx install aztree              # Python 3.9+ (or: pip install aztree)
+dotnet tool install -g aztree    # .NET 8 or later, no Python needed
+```
+
+Or download the executable for your system from the [latest release](https://github.com/milanm/aztree/releases/latest): Windows, Linux or macOS, no Python needed. The downloads aren't signed yet, so Windows and macOS ask once before running them. On Linux and macOS, run `chmod +x` on the file first.
+
+Then:
+
+```bash
+aztree --demo                    # try it with fake data, no Azure needed
 az login
-aztree                      # your current subscription
-aztree --all                # every subscription you can see
+aztree                           # your current subscription
+aztree --all                     # every subscription you can see
 ```
 
 From a clone, run `python -m aztree` without installing anything.
@@ -36,7 +46,14 @@ Click to select and click again (or press Enter) to zoom in. Once you've clicked
 
 ## Requirements
 
-- Python 3.9+ and the [Azure CLI](https://aka.ms/azcli), logged in with `az login`. Without the CLI, put a token for `https://management.azure.com/` in `AZURE_ACCESS_TOKEN` and name the subscriptions with `--subscription` or `--all`. A bare token only sees its own tenant; through the CLI, aztree sees every tenant you're logged in to and gets a token for each.
+- The [Azure CLI](https://aka.ms/azcli), logged in with `az login`, and Python 3.9+ or .NET 8+ unless you use the downloaded executable. Without the CLI, put a token for `https://management.azure.com/` in `AZURE_ACCESS_TOKEN` and name the subscriptions with `--subscription` or `--all`. A bare token only sees its own tenant; through the CLI, aztree sees every tenant you're logged in to and gets a token for each.
+- Azure PowerShell instead of the CLI works too: give aztree a token and name the subscription.
+
+  ```powershell
+  $t = (Get-AzAccessToken -ResourceUrl https://management.azure.com/).Token
+  $env:AZURE_ACCESS_TOKEN = if ($t -is [securestring]) { [System.Net.NetworkCredential]::new('', $t).Password } else { $t }
+  aztree --subscription "My subscription"
+  ```
 - The **Cost Management Reader** role (or Reader) on each subscription. Advisor tips, the Resource Graph checks and the automatic tag choice need Reader; without it you still get the page, and `--tag KEY` still gives you the tag view.
 - Tested on a CSP subscription. On CSP, Azure shows costs at retail prices without your partner's discounts, and reserved usage as $0 even with `--metric AmortizedCost`, so the totals won't match your partner's invoice. Pay-as-you-go and Visual Studio subscriptions use the same API.
 - EA and MCA billing scopes should work through `--scope`, but nobody has tried yet. At such a scope the subscription view shows the whole scope as one box, and Advisor is skipped.
@@ -100,6 +117,8 @@ aztree only reads cost data, forecasts, tag names, Advisor recommendations and R
 python -m unittest discover -s tests
 python -m aztree --demo
 ```
+
+`packaging/build_native.py` freezes aztree into one executable with PyInstaller and checks it runs. `dotnet/` is the dotnet tool: a small launcher that runs the executable built for the machine it's on.
 
 The tests need no Azure access. The viewer tests run the page's script in Node and are skipped without it.
 
