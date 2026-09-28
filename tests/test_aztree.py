@@ -968,6 +968,17 @@ class SecondReviewTest(unittest.TestCase):
                         reject_for={"/subscriptions/aaaa-1": {"CostUSD"}, "/subscriptions/bbbb-2": {"Cost"}})
         self.assertEqual(rows_of(data, "service")[("Storage", "LRS")][3], 300.0)
 
+    def test_refund_that_cancels_an_earlier_charge_is_kept(self):
+        tables = {("ServiceName", "Meter"): {"/subscriptions/aaaa-1": [
+            (20260922, "Azure Cosmos DB", "Reserved 100 RU/s", 100.0, "USD", None),   # previous period: bought
+            (20260927, "Azure Cosmos DB", "Reserved 100 RU/s", -100.0, "USD", None),  # this period: refunded
+            (20260925, "Storage", "LRS", 5.0, "USD", None),
+        ]}}
+        data, _ = fetch(tables)
+        self.assertIn(("Azure Cosmos DB", "Reserved 100 RU/s"), rows_of(data, "service"))
+        totals = aztree.summarize(data)["totals"]
+        self.assertEqual((totals["previous"], totals["current"]), (100.0, -95.0))
+
 
 class ExplainTest(unittest.TestCase):
     def test_403_mentions_cost_management_reader(self):

@@ -348,7 +348,8 @@ def fold(entries, n, usd):
 
 def pack(rows):
     out = [{"k": list(k), "d": [round(v, 4) for v in d]} for k, d in rows.items()]
-    return [r for r in out if abs(sum(r["d"])) >= 0.005]
+    # drop only noise: a charge in one period and its refund in the other sum to zero but still count in both
+    return [r for r in out if sum(abs(v) for v in r["d"]) >= 0.005]
 
 
 # ---------------------------------------------------------------- demo data
