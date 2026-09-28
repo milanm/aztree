@@ -735,6 +735,20 @@ class MainTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             quiet(self.main, "--from", str(self.saved), "--days", "184")
 
+    def test_entry_point_is_the_last_statement(self):
+        # Run as a script, main() only sees what is defined above the __main__ guard.
+        import ast
+        last = ast.parse(Path(aztree.__file__).read_text(encoding="utf-8")).body[-1]
+        self.assertIsInstance(last, ast.If)
+        self.assertIn("__main__", ast.unparse(last.test))
+
+    def test_runs_as_a_script(self):
+        target = self.dir / "summary.json"
+        r = aztree.subprocess.run([sys.executable, aztree.__file__, "--from", str(self.saved), "--export", str(target)],
+                                  capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(target.exists())
+
     def test_scope_and_subscription_do_not_mix(self):
         with self.assertRaises(SystemExit):
             quiet(self.main, "--scope", "/providers/Microsoft.Billing/billingAccounts/1", "--subscription", "x")

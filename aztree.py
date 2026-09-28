@@ -46,6 +46,65 @@ def die(msg):
     sys.exit(1)
 
 
+# ---------------------------------------------------------------- auth and subscriptions
+
+def az_cli(args, run=subprocess.run, az_path=None):
+    """Run the Azure CLI and return stdout. `az` is az.cmd on Windows, so resolve the full path first."""
+    path = az_path or shutil.which("az")
+    if not path:
+        die("need the Azure CLI (https://aka.ms/azcli), or a token in AZURE_ACCESS_TOKEN.")
+    r = run([path, *args], capture_output=True, text=True)
+    if r.returncode:
+        err = r.stderr.strip()
+        hint = "\n  -> Log in first: `az login`." if "login" in err.lower() or "expired" in err.lower() else ""
+        die(f"Azure CLI error: {err}{hint}")
+    return r.stdout
+
+
+def get_token(env=os.environ, run=subprocess.run, az_path=None):
+    if env.get("AZURE_ACCESS_TOKEN"):
+        return env["AZURE_ACCESS_TOKEN"]
+    out = az_cli(["account", "get-access-token", "--resource", ARM + "/", "--query", "accessToken", "-o", "tsv"],
+                 run=run, az_path=az_path)
+    return out.strip()
+
+
+def list_subscriptions(az):
+    """Every subscription the token can see, straight from ARM, so AZURE_ACCESS_TOKEN works without the CLI."""
+    subs, url = [], "/subscriptions?api-version=2022-12-01"
+    while url:
+        page = az.call("GET", url)
+        subs += [{"id": s["subscriptionId"], "name": s["displayName"], "state": s["state"]} for s in page.get("value", [])]
+        url = page.get("nextLink")
+    return subs
+
+
+def current_subscription(run=subprocess.run):
+    """The subscription `az account show` points at, or None without the CLI."""
+    if not shutil.which("az"):
+        return None
+    return json.loads(az_cli(["account", "show", "--query", "{id:id, name:name}", "-o", "json"], run=run))
+
+
+def pick_subscriptions(available, wanted, all_, current):
+    """Choose which subscriptions to read: --all, --subscription (id or name), or the CLI's current one."""
+    if all_:
+        return [{"id": s["id"], "name": s["name"]} for s in available if s["state"] == "Enabled"]
+    if not wanted:
+        if not current:
+            die("no default subscription. Pass --subscription ID_OR_NAME or --all.")
+        return [{"id": current["id"], "name": current["name"]}]
+    picked = []
+    for w in wanted:
+        hit = next((s for s in available if w.lower() in (s["id"].lower(), s["name"].lower())), None)
+        if not hit:
+            known = "\n    ".join(f"{s['name']}  ({s['id']})" for s in available) or "(none)"
+            die(f"no subscription matches '{w}'. Subscriptions you can read:\n    {known}")
+        if all(p["id"] != hit["id"] for p in picked):
+            picked.append({"id": hit["id"], "name": hit["name"]})
+    return picked
+
+
 # ---------------------------------------------------------------- Azure REST client
 
 class AzureError(Exception):
@@ -306,6 +365,28 @@ def advisor_recs(az, target):
     return sorted(best.values(), key=lambda r: -(r["annual_savings"] or -1))
 
 
+def advisor_rec(p, target):
+    ext = p.get("extendedProperties") or {}
+    short = p.get("shortDescription") or {}
+    resource = ((p.get("resourceMetadata") or {}).get("resourceId") or "").lower()
+    savings = ext.get("annualSavingsAmount")
+    name = p.get("impactedValue") or resource.rsplit("/", 1)[-1]
+    rec = {
+        "problem": short.get("problem", ""),
+        "solution": short.get("solution", ""),
+        "impact": p.get("impact"),
+        "resource": resource,
+        "resource_name": target["name"] if name.lower() == target["id"].lower() else name,
+        "resource_type": p.get("impactedField"),
+        "sku": ext.get("displaySKU") or ext.get("sku") or ext.get("targetSku"),
+        "term": ext.get("term"),
+        "annual_savings": float(savings) if savings not in (None, "") else None,
+        "currency": ext.get("savingsCurrency"),
+        "subscription": target["name"],
+    }
+    return (p.get("recommendationTypeId"), resource, rec["sku"]), rec
+
+
 # ---------------------------------------------------------------- AI export
 
 AI_INSTRUCTIONS = (
@@ -508,84 +589,3 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
-
-
-def advisor_rec(p, target):
-    ext = p.get("extendedProperties") or {}
-    short = p.get("shortDescription") or {}
-    resource = ((p.get("resourceMetadata") or {}).get("resourceId") or "").lower()
-    savings = ext.get("annualSavingsAmount")
-    name = p.get("impactedValue") or resource.rsplit("/", 1)[-1]
-    rec = {
-        "problem": short.get("problem", ""),
-        "solution": short.get("solution", ""),
-        "impact": p.get("impact"),
-        "resource": resource,
-        "resource_name": target["name"] if name.lower() == target["id"].lower() else name,
-        "resource_type": p.get("impactedField"),
-        "sku": ext.get("displaySKU") or ext.get("sku") or ext.get("targetSku"),
-        "term": ext.get("term"),
-        "annual_savings": float(savings) if savings not in (None, "") else None,
-        "currency": ext.get("savingsCurrency"),
-        "subscription": target["name"],
-    }
-    return (p.get("recommendationTypeId"), resource, rec["sku"]), rec
-
-
-# ---------------------------------------------------------------- auth and subscriptions
-
-def az_cli(args, run=subprocess.run, az_path=None):
-    """Run the Azure CLI and return stdout. `az` is az.cmd on Windows, so resolve the full path first."""
-    path = az_path or shutil.which("az")
-    if not path:
-        die("need the Azure CLI (https://aka.ms/azcli), or a token in AZURE_ACCESS_TOKEN.")
-    r = run([path, *args], capture_output=True, text=True)
-    if r.returncode:
-        err = r.stderr.strip()
-        hint = "\n  -> Log in first: `az login`." if "login" in err.lower() or "expired" in err.lower() else ""
-        die(f"Azure CLI error: {err}{hint}")
-    return r.stdout
-
-
-def get_token(env=os.environ, run=subprocess.run, az_path=None):
-    if env.get("AZURE_ACCESS_TOKEN"):
-        return env["AZURE_ACCESS_TOKEN"]
-    out = az_cli(["account", "get-access-token", "--resource", ARM + "/", "--query", "accessToken", "-o", "tsv"],
-                 run=run, az_path=az_path)
-    return out.strip()
-
-
-def list_subscriptions(az):
-    """Every subscription the token can see, straight from ARM, so AZURE_ACCESS_TOKEN works without the CLI."""
-    subs, url = [], "/subscriptions?api-version=2022-12-01"
-    while url:
-        page = az.call("GET", url)
-        subs += [{"id": s["subscriptionId"], "name": s["displayName"], "state": s["state"]} for s in page.get("value", [])]
-        url = page.get("nextLink")
-    return subs
-
-
-def current_subscription(run=subprocess.run):
-    """The subscription `az account show` points at, or None without the CLI."""
-    if not shutil.which("az"):
-        return None
-    return json.loads(az_cli(["account", "show", "--query", "{id:id, name:name}", "-o", "json"], run=run))
-
-
-def pick_subscriptions(available, wanted, all_, current):
-    """Choose which subscriptions to read: --all, --subscription (id or name), or the CLI's current one."""
-    if all_:
-        return [{"id": s["id"], "name": s["name"]} for s in available if s["state"] == "Enabled"]
-    if not wanted:
-        if not current:
-            die("no default subscription. Pass --subscription ID_OR_NAME or --all.")
-        return [{"id": current["id"], "name": current["name"]}]
-    picked = []
-    for w in wanted:
-        hit = next((s for s in available if w.lower() in (s["id"].lower(), s["name"].lower())), None)
-        if not hit:
-            known = "\n    ".join(f"{s['name']}  ({s['id']})" for s in available) or "(none)"
-            die(f"no subscription matches '{w}'. Subscriptions you can read:\n    {known}")
-        if all(p["id"] != hit["id"] for p in picked):
-            picked.append({"id": hit["id"], "name": hit["name"]})
-    return picked
