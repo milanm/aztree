@@ -2218,6 +2218,44 @@ class MapLookTest(unittest.TestCase):
         self.assertNotIn("to-do", self.run_page(data, "region")["sub"])  # nothing hatched there
 
 
+@unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+class FilterDimTest(unittest.TestCase):
+    render = ViewerTest.render
+    run_page = ViewerTest.run_page
+    DATA = [("SQL Database", "vCore", [10] * 6), ("Storage", "Hot LRS Data Stored", [5] * 6),
+            ("Storage", "LRS Snapshots", [2] * 6)]
+
+    def cls(self, page):
+        return {d["name"]: d["cls"].split() for d in page["drawn"]}
+
+    def test_typing_dims_what_does_not_match_and_keeps_it_drawn(self):
+        cls = self.cls(self.run_page(make_data(self.DATA), "service", click={"type": "snap"}))
+        self.assertIn("dim", cls["vCore"])
+        self.assertIn("dim", cls["SQL Database"])
+        self.assertNotIn("dim", cls["LRS Snapshots"])
+        self.assertNotIn("dim", cls["Storage"])  # holds a match
+        self.assertIn("dim", cls["Hot LRS Data Stored"])
+
+    def test_the_readout_counts_matches_in_the_views_own_words(self):
+        page = self.run_page(make_data(self.DATA), "service", click={"type": "lrs"})
+        self.assertIn("filter “lrs” · 2 meters · $21.00 · 41% of bill", page["sub"])
+        page = self.run_page(make_data(self.DATA), "subscription", click={"type": "stor"})
+        self.assertIn("1 service ·", page["sub"])
+        page = self.run_page(make_data(self.DATA), "service", click={"type": "zzz"})
+        self.assertIn("no match", page["sub"])
+
+    def test_enter_keeps_only_the_matches_and_esc_clears(self):
+        page = self.run_page(make_data(self.DATA), "service", click=[{"type": "snap"}, {"filterKey": "Enter"}])
+        self.assertEqual([d["name"] for d in page["drawn"]], ["Storage", "LRS Snapshots"])
+        page = self.run_page(make_data(self.DATA), "service", click=[{"type": "snap"}, {"filterKey": "Enter"}, {"filterKey": "Escape"}])
+        self.assertEqual(len(page["drawn"]), 5)
+        self.assertFalse([d for d in page["drawn"] if "dim" in d["cls"].split()])
+
+    def test_the_selection_survives_typing(self):
+        page = self.run_page(make_data(self.DATA), "service", click=[{"map": "click", "name": "vCore"}, {"type": "snap"}])
+        self.assertIn('<div class="sel-name">vCore</div>', page["side"])
+
+
 class ExplainTest(unittest.TestCase):
     def test_bad_response_is_not_blamed_on_the_network(self):
         send = FakeSend(page(["UsageDate", "ServiceName", "Meter"], [[20260925, "Storage", "LRS"]]))

@@ -69,6 +69,7 @@ label.chk input { accent-color: var(--accent); margin: 0; }
 .leaf .n { color: #e3e6ec; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .leaf .v { color: color-mix(in srgb, var(--c) 45%, #9aa1ad); font-size: 10.5px; white-space: nowrap; }
 .cell.sel { outline: 2px solid var(--accent); outline-offset: -2px; }
+.cell.dim { opacity: .18; } /* the filter fades what doesn't match, so the map keeps its shape */
 .leaf.sel { z-index: 2; } /* not groups: their boxes are siblings on top, and a raised group would cover them */
 .empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 14px; }
 
@@ -158,7 +159,7 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const hashView = (() => { try { return decodeURIComponent(location.hash.slice(1)); } catch { return ""; } })();
 const state = { view: VIEW_KEYS.includes(hashView) && DATA.views[hashView] ? hashView : "service",
-  change: false, filter: "", zoom: null, sel: null, expanded: { hints: false, recs: false } };
+  change: false, filter: "", collapsed: false, zoom: null, sel: null, expanded: { hints: false, recs: false } };
 
 // ---------- formatting
 const SYMBOLS = { USD: "$", EUR: "€", GBP: "£", JPY: "¥", CNY: "¥", INR: "₹", KRW: "₩", BRL: "R$", AUD: "A$", CAD: "C$",
@@ -250,7 +251,8 @@ function color(n) {
 }
 
 // ---------- tree
-function buildTree(viewKey, filter) {
+// With collapse off, rows that don't match the filter stay in the tree (the map dims them): `hit` marks the matches.
+function buildTree(viewKey, filter, collapse = true) {
   const v = DATA.views[viewKey], names = v.names || {};
   const [A, B] = v.dims, q = filter.toLowerCase();
   const root = { kind: "root", name: "all", children: [], daily: new Float64Array(N) };
@@ -258,13 +260,14 @@ function buildTree(viewKey, filter) {
   for (const r of v.rows) {
     const [a, b] = r.k;
     const ga = DIM[A].label(a, names), lb = DIM[B].label(b, names);
-    if (q && !`${a} ${b} ${ga} ${lb}`.toLowerCase().includes(q)) continue;
+    const hit = !q || `${a} ${b} ${ga} ${lb}`.toLowerCase().includes(q);
+    if (!hit && collapse) continue;
     let g = groups.get(a);
     if (!g) {
       g = { kind: "group", key: a, name: ga, full: a, dim: A, parent: root, children: [], daily: new Float64Array(N) };
       groups.set(a, g); root.children.push(g);
     }
-    g.children.push({ kind: "leaf", key: b, name: lb, full: b, dim: B, parent: g, daily: Float64Array.from(r.d) });
+    g.children.push({ kind: "leaf", key: b, name: lb, full: b, dim: B, parent: g, daily: Float64Array.from(r.d), hit });
   }
   (function total(n) {
     if (n.children) {
@@ -273,6 +276,7 @@ function buildTree(viewKey, filter) {
       n.credits = n.children.reduce((s, c) => s + c.credits, 0);
       n.gone = n.children.filter(c => c.cur < 0.005 && c.prev >= 0.005); // spent before, nothing now: no box, still news
       n.children = n.children.filter(c => c.cur >= 0.005).sort((a, b) => b.cur - a.cur);
+      n.hit = n.children.some(c => c.hit);
     }
     n.prev = 0; n.cur = 0;
     for (let i = 0; i < N; i++) i < SPLIT ? (n.prev += n.daily[i]) : (n.cur += n.daily[i]);
@@ -329,7 +333,8 @@ function place(el, r, gap) {
 let drawn = []; // the nodes the last render() drew, in drawing order (largest first within each parent)
 function cell(cls, n, r, gap) {
   const el = document.createElement("div");
-  el.className = "cell " + cls + (isTodo(n) ? " todo" : ""); el._n = n; n._el = el;
+  el.className = "cell " + cls + (isTodo(n) ? " todo" : "") + (state.filter && !state.collapsed && !n.hit ? " dim" : "");
+  el._n = n; n._el = el;
   drawn.push(n);
   el.style.setProperty("--c", color(n));
   place(el, r, gap);
@@ -368,13 +373,27 @@ function drawGroup(frag, r) {
 }
 // zoom holds a group key or null; "" is a real key (the no-region group), so never test it for truthiness
 function zoomed() { return state.zoom === null ? undefined : root.children.find(g => g.key === state.zoom); }
+const narrowed = () => !!state.filter && state.collapsed; // Enter in the filter: only the matches are in the tree
+// a node as keys that survive a rebuild: [group, leaf], or [group, null] for a group; never "+N more"
+const selKey = n => (!n || n.more || !n.parent ? null : n.kind === "group" ? [n.key, null] : [n.parent.key, n.key]);
+function findNode(k) {
+  if (!k) return null;
+  const g = root.children.find(g => g.key === k[0]);
+  return (k[1] === null ? g : g?.children.find(c => c.key === k[1])) ?? null;
+}
+function rebuild() {
+  const k = selKey(state.sel);
+  root = buildTree(state.view, state.filter, narrowed());
+  if (state.zoom !== null && !zoomed()) state.zoom = null;
+  state.sel = findNode(k);
+}
 
 function render() {
   drawn = [];
   const base = zoomed() || root;
   const W = map.clientWidth, H = map.clientHeight, frag = document.createDocumentFragment();
   if (!base.children.length) {
-    map.innerHTML = `<div class="empty">${state.filter ? "Nothing matches “" + esc(state.filter) + "”" : "No spend in this period"}</div>`;
+    map.innerHTML = `<div class="empty">${narrowed() ? "Nothing matches “" + esc(state.filter) + "”" : "No spend in this period"}</div>`;
   } else {
     if (base === root) for (const r of squarify(base.children, 0, 0, W, H)) drawGroup(frag, r);
     else for (const r of squarify(fold(base.children, W, H), 0, 0, W, H)) drawLeaf(frag, r);
@@ -389,7 +408,7 @@ function render() {
 // Only the service view has meters, where a negative one is a credit or refund. The other views net those into their
 // boxes, so there only the whole bill carries the note, with the same figure as the service view and the export.
 const creditNote = (n, tag) => {
-  const c = state.view === "service" ? n.credits : n.kind === "root" && !state.filter ? CREDITS : 0;
+  const c = state.view === "service" ? n.credits : n.kind === "root" && !narrowed() ? CREDITS : 0;
   return c <= -0.005
     ? `<${tag} class="credits" title="meters with a negative total (credits, refunds) count in the total but can't be drawn as boxes">incl. ${money(c)} credits &amp; refunds</${tag}>`
     : "";
@@ -409,10 +428,16 @@ function renderChrome(base) {
     : CATS.map(([k, l]) => `<span><i style="background:var(--${k})"></i>${l}</span>`).join(""));
   const fallback = totalsOnly()
     ? `<span title="too many resources for a daily series: each resource has one total per period">period totals for ${esc(DATA.resource_fallback.join(", "))}</span>` : "";
-  const untagged = state.view === "tag" && !state.filter
+  // what the filter matches, counted over the whole view whether the map dims the rest or drops it
+  const hits = state.filter ? root.children.flatMap(g => g.children).filter(n => n.hit) : [];
+  const found = hits.reduce((s, n) => s + n.cur, 0);
+  const readout = !state.filter ? "" : `<span>filter “${esc(state.filter)}” · ${hits.length
+    ? `${hits.length} ${esc(hits.length === 1 ? DIM[B].one : DIM[B].many)} · ${money(found)} · ${pct(grand > 0 ? found / grand : 0)} of bill`
+    : "no match"}</span>`;
+  const untagged = state.view === "tag" && !narrowed()
     ? `<span title="spend on resources without the ${esc(TAG)} tag">untagged ${money(UNTAGGED)} (${pct(grand > 0 ? UNTAGGED / grand : 0)} of bill)</span>` : "";
   $("#sub").innerHTML = `<span><b>${money(root.cur)}</b> · ${period()}</span><span>${root.children.length} ${esc(DIM[A].many)} · ${leaves} ${esc(DIM[B].many)}</span>
-    ${fallback}${untagged}${creditNote(root, "span")}${state.filter ? `<span>filter “${esc(state.filter)}” · ${pct(root.cur / grand)} of bill</span>` : ""}<div class="legend">${legend}</div>`;
+    ${fallback}${untagged}${creditNote(root, "span")}${readout}<div class="legend">${legend}</div>`;
 }
 
 // a subscription with too many resources gets one total per resource and period, so no daily chart in that view
@@ -438,9 +463,9 @@ function renderSide() {
   const path = n.kind === "leaf" ? (n.full.startsWith("/") ? n.full : `${n.parent.name} / ${n.full}`)
     : n.kind === "group" ? n.full : `${DIM[A].many} → ${DIM[B].many}`;
   const kind = n.kind === "root" ? "whole bill" : n.more ? `${n.more} ${DIM[n.dim].many}` : DIM[n.dim].one;
-  const title = n.kind === "root" ? (state.filter ? `“${state.filter}”` : "Everything") : n.name;
+  const title = n.kind === "root" ? (narrowed() ? `“${state.filter}”` : "Everything") : n.name;
   // Azure's own forecast for this calendar month, on the whole bill only: it knows nothing of views or filters
-  const F = n.kind === "root" && !state.filter ? DATA.forecast : null;
+  const F = n.kind === "root" && !narrowed() ? DATA.forecast : null;
   const mon = F && new Date(F.month + "-01T00:00:00").toLocaleDateString("en-US", { month: "short" });
   const tail = F
     ? `<div><span>${mon} so far</span>${money(F.actual)}</div><div><span>${mon} forecast</span>${money(F.total)}</div>`
@@ -585,7 +610,7 @@ const isTodo = n => n.kind === "leaf" && !n.more && (marks().has(n.parent.key + 
 // ---------- interaction
 function showView(v) {
   state.view = v; state.zoom = null; state.sel = null;
-  root = buildTree(v, state.filter);
+  root = buildTree(v, state.filter, narrowed());
   history.replaceState(null, "", "#" + v);
 }
 function setView(v) {
@@ -606,7 +631,7 @@ function up() {
   if (state.zoom !== null) { const g = zoomed(); state.zoom = null; state.sel = g || null; render(); }
   else if (state.sel) select(null);
 }
-function clearFilter() { state.filter = ""; $("#filter").value = ""; }
+function clearFilter() { state.filter = ""; state.collapsed = false; $("#filter").value = ""; }
 // jump to a box in a view: zoom into its group and select it
 function reveal(view, find) {
   clearFilter(); showView(view);
@@ -629,12 +654,8 @@ map.addEventListener("dblclick", e => { const c = e.target.closest(".cell"); if 
 $("#views").addEventListener("click", e => e.target.dataset.v && setView(e.target.dataset.v));
 $("#change").addEventListener("change", e => { state.change = e.target.checked; render(); });
 $("#crumbs").addEventListener("click", e => { if (e.target.closest("[data-up]")) up(); });
-$("#filter").addEventListener("input", e => {
-  state.filter = e.target.value.trim(); state.sel = null;
-  root = buildTree(state.view, state.filter);
-  if (state.zoom !== null && !zoomed()) state.zoom = null;
-  render();
-});
+// typing dims what doesn't match; the map keeps its shape, and the zoom and selection stay
+$("#filter").addEventListener("input", e => { state.filter = e.target.value.trim(); state.collapsed = false; rebuild(); render(); });
 $("#side").addEventListener("click", e => {
   const more = e.target.closest("[data-more]");
   if (more) { state.expanded[more.dataset.more] = !state.expanded[more.dataset.more]; renderSide(); return; }
@@ -660,11 +681,15 @@ $("#side").addEventListener("click", e => {
 document.addEventListener("keydown", e => {
   const typing = e.target === $("#filter");
   if (e.key === "Escape") {
-    if (typing || state.filter) { $("#filter").value = ""; $("#filter").blur(); if (state.filter) $("#filter").dispatchEvent(new Event("input")); }
+    if (typing || state.filter) { clearFilter(); $("#filter").blur(); rebuild(); render(); }
     else up();
     return;
   }
-  if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (typing) { // Enter keeps only the matches, as the filter always did
+    if (e.key === "Enter" && state.filter) { state.collapsed = true; rebuild(); $("#filter").blur(); render(); }
+    return;
+  }
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.key === "/") { e.preventDefault(); $("#filter").focus(); }
   else if (e.key === "Enter") open(state.sel);
   else if (e.key === "Backspace") { e.preventDefault(); up(); }
