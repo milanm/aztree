@@ -215,8 +215,9 @@ class Router:
     """Fake Cost Management: answers each query from `tables[(dim1, dim2)][scope]`, a list of
     (usage_date, value1, value2, cost, currency, cost_usd) tuples."""
 
-    def __init__(self, tables, explode=(), reject_usd=False):
-        self.tables, self.explode, self.reject_usd = tables, explode, reject_usd
+    def __init__(self, tables, explode=(), reject_usd=False, reject=()):
+        self.tables, self.explode = tables, explode
+        self.reject = set(reject) | ({"CostUSD"} if reject_usd else set())
         self.bodies = []
 
     def __call__(self, method, url, data, headers):
@@ -224,15 +225,16 @@ class Router:
         self.bodies.append(body)
         dims = tuple(g["name"] for g in body["dataset"]["grouping"])
         aggs = [a["name"] for a in body["dataset"]["aggregation"].values()]
-        if self.reject_usd and "CostUSD" in aggs:
-            return error(400, "BadRequest", "Invalid aggregation CostUSD")
+        if self.reject & set(aggs):
+            return error(400, "BadRequest", f"Invalid aggregation {sorted(self.reject & set(aggs))}")
         scope = url.split("/providers/Microsoft.CostManagement")[0][len(aztree.ARM):]
         if dims in self.explode:
             return page(["Cost"], [], next_link=url.split("&")[0] + "&$skiptoken=more")
         cols = aggs + ["UsageDate", *dims, "Currency"]
         rows = []
         for date, a, b, cost, cur, usd in self.tables.get(dims, {}).get(scope, []):
-            vals = {"Cost": cost, "CostUSD": usd if usd is not None else cost, "UsageDate": date,
+            usd = usd if usd is not None else cost
+            vals = {"Cost": cost, "CostUSD": usd, "PreTaxCost": cost, "PreTaxCostUSD": usd, "UsageDate": date,
                     dims[0]: a, dims[1]: b, "Currency": cur}
             rows.append([vals[c] for c in cols])
         return page(cols, rows)
@@ -259,7 +261,7 @@ DEV = {"id": "bbbb-2", "name": "acme-dev"}
 
 
 def fetch(tables, targets=(PROD,), **kw):
-    router = Router(tables, **{k: kw.pop(k) for k in ("explode", "reject_usd") if k in kw})
+    router = Router(tables, **{k: kw.pop(k) for k in ("explode", "reject_usd", "reject") if k in kw})
     data = aztree.fetch(client(router), [aztree.subscription_target(t) for t in targets], 3, "ActualCost",
                         advisor=False, log=lambda *a: None, today=TODAY)
     return data, router
@@ -597,17 +599,18 @@ TEMPLATE = (Path(__file__).resolve().parent.parent / "viewer.html").read_text(en
 # and fills the side panel, without a browser.
 FAKE_DOM = r"""
 const vm = require("vm"), fs = require("fs");
-const [code, view] = JSON.parse(fs.readFileSync(0, "utf8"));
+const [code, view, click] = JSON.parse(fs.readFileSync(0, "utf8"));
 class El {
   constructor(tag) {
     Object.assign(this, { tag, children: [], dataset: {}, className: "", innerHTML: "", value: "", checked: false,
-      isConnected: true, clientWidth: 1100, clientHeight: 700, offsetWidth: 100, offsetHeight: 30 });
+      isConnected: true, clientWidth: 1100, clientHeight: 700, offsetWidth: 100, offsetHeight: 30, on: {} });
     this.style = { setProperty() {} };
     this.classList = { add() {}, remove() {}, toggle() {} };
   }
   append(...c) { this.children.push(...c); }
   replaceChildren(...c) { this.children = c; }
-  addEventListener() {} closest() { return null; } focus() {} blur() {} click() {} dispatchEvent() {}
+  addEventListener(type, fn) { (this.on[type] = this.on[type] || []).push(fn); }
+  closest() { return null; } focus() {} blur() {} click() {} dispatchEvent() {}
 }
 const byId = {}, made = [];
 Object.assign(globalThis, {
@@ -621,10 +624,16 @@ Object.assign(globalThis, {
   innerWidth: 1400, innerHeight: 900,
 });
 vm.runInThisContext(code);
+if (click) {  // "[data-rec]:0" clicks the first Advisor tip in the side panel
+  const [sel, value] = click.split(":");
+  const target = { closest: s => (s === sel ? { dataset: { [sel.slice(6, -1)]: value } } : null) };
+  for (const fn of byId["#side"].on.click || []) fn({ target });
+}
 console.log(JSON.stringify({
   leaves: made.filter(e => e.className === "cell leaf").length,
   boxes: made.map(e => e.innerHTML).join("\n"),
   side: byId["#side"].innerHTML, sub: byId["#sub"].innerHTML, meta: byId["#meta"].innerHTML,
+  crumbs: byId["#crumbs"].innerHTML,
 }));
 """
 
@@ -653,10 +662,10 @@ class ViewerTest(unittest.TestCase):
             self.assertFalse(word in TEMPLATE, word)
         self.assertIn("__AZTREE_DATA__", TEMPLATE)
 
-    def run_page(self, data, view):
+    def run_page(self, data, view, click=None):
         html = self.render(data).read_text(encoding="utf-8")
         code = html.split("<script>", 1)[1].rsplit("</script>", 1)[0]
-        out = aztree.subprocess.run(["node", "-e", FAKE_DOM], input=json.dumps([code, view]),
+        out = aztree.subprocess.run(["node", "-e", FAKE_DOM], input=json.dumps([code, view, click]),
                                     capture_output=True, text=True, encoding="utf-8", timeout=60)
         self.assertEqual(out.returncode, 0, out.stderr[-2000:])
         return json.loads(out.stdout)
@@ -824,6 +833,124 @@ class DemoTest(unittest.TestCase):
         finally:
             aztree.get_token = real
         self.assertIn('"demo":true', page.read_text(encoding="utf-8"))
+
+
+class ReviewFixesTest(unittest.TestCase):
+    """Findings from the final review, each reproduced before it was fixed."""
+
+    def test_network_errors_are_retried(self):
+        waits, calls = [], []
+
+        def send(method, url, data, headers):
+            calls.append(url)
+            if len(calls) == 1:
+                raise aztree.urllib.error.URLError(ConnectionResetError("connection reset"))
+            return page(["UsageDate", "ServiceName", "Meter", "Cost"], [[20260925, "Storage", "LRS", 1.0]])
+
+        rows = aztree.query(client(send, sleep=waits.append), "/subscriptions/s1", "2026-09-22", "2026-09-27",
+                            ["ServiceName", "Meter"], "ActualCost")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(waits), 1)
+
+    def test_network_error_that_persists_is_an_azure_error(self):
+        def send(method, url, data, headers):
+            raise aztree.urllib.error.URLError("no route to host")
+
+        with self.assertRaises(aztree.AzureError):
+            aztree.query(client(send), "/subscriptions/s1", "2026-09-22", "2026-09-27", ["ServiceName", "Meter"], "ActualCost")
+
+    def test_malformed_advisor_data_does_not_lose_the_run(self):
+        router = Router(ONE_SUB)
+
+        def send(method, url, data, headers):
+            if "Microsoft.Advisor" in url:
+                bad = advisor_item("Buy reservation", "/subscriptions/aaaa-1", "aaaa-1", "sku", "P1Y", "N/A")
+                return 200, {}, json.dumps({"value": [bad]}).encode()
+            return router(method, url, data, headers)
+
+        data = aztree.fetch(client(send), [aztree.subscription_target(PROD)], 3, "ActualCost", advisor=True,
+                            log=lambda *a: None, today=TODAY)
+        self.assertEqual(data["advisor"], [])
+        self.assertTrue(data["advisor_error"])
+        self.assertIn(("Storage", "Hot LRS Data Stored"), rows_of(data, "service"))
+
+    def test_falls_back_to_pretaxcost(self):
+        data, router = fetch(ONE_SUB, reject={"Cost", "CostUSD"})
+        self.assertEqual(rows_of(data, "service")[("Storage", "Hot LRS Data Stored")], [1.0, 0, 0, 0, 0, 2.0])
+        aggs = [a["name"] for a in router.bodies[-1]["dataset"]["aggregation"].values()]
+        self.assertIn("PreTaxCost", aggs)
+
+    def test_response_without_a_cost_column_is_an_error(self):
+        send = FakeSend(page(["UsageDate", "ServiceName", "Meter"], [[20260925, "Storage", "LRS"]]))
+        with self.assertRaises(aztree.AzureError):
+            aztree.query(client(send), "/subscriptions/s1", "2026-09-22", "2026-09-27", ["ServiceName", "Meter"], "ActualCost")
+
+    def test_ambiguous_subscription_name_dies_listing_ids(self):
+        subs = [{"id": "aaaa-1", "name": "Pay-As-You-Go", "state": "Enabled"},
+                {"id": "bbbb-2", "name": "Pay-As-You-Go", "state": "Enabled"}]
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            aztree.pick_subscriptions(subs, wanted=["pay-as-you-go"], all_=False, current=None)
+        self.assertIn("aaaa-1", err.getvalue())
+        self.assertIn("bbbb-2", err.getvalue())
+
+    def test_same_named_subscriptions_get_telling_labels(self):
+        tables = {("ServiceName", "Meter"): {"/subscriptions/aaaa-1": [(20260925, "Storage", "LRS", 1.0, "USD", None)],
+                                             "/subscriptions/bbbb-2": [(20260925, "Storage", "LRS", 1.0, "USD", None)]},
+                  ("ResourceGroupName", "ResourceId"): {
+                      "/subscriptions/aaaa-1": [(20260925, "rg-app", RID, 1.0, "USD", None)],
+                      "/subscriptions/bbbb-2": [(20260925, "rg-app", RID.replace("aaaa-1", "bbbb-2"), 1.0, "USD", None)]}}
+        twins = ({"id": "aaaa-1", "name": "Pay-As-You-Go"}, {"id": "bbbb-2", "name": "Pay-As-You-Go"})
+        data, _ = fetch(tables, targets=twins)
+        labels = list(data["views"]["subscription"]["names"].values())
+        self.assertEqual(len(set(labels)), 2, labels)
+        self.assertEqual(len(set(data["views"]["resource"]["names"].values())), 2)
+
+    def test_non_subscription_scope_has_no_advisor_panel(self):
+        scope = aztree.scope_target("/providers/Microsoft.Billing/billingAccounts/1")
+        data = aztree.fetch(client(Router({})), [scope], 3, "ActualCost", advisor=True, log=lambda *a: None, today=TODAY)
+        self.assertIsNone(data["advisor"])
+
+    def test_missing_service_name_does_not_crash(self):
+        tables = {("ServiceName", "Meter"): {"/subscriptions/aaaa-1": [(20260925, None, "Something", 1.0, "USD", None)]},
+                  ("ResourceLocation", "ServiceName"): {"/subscriptions/aaaa-1": [(20260925, "us central", None, 1.0, "USD", None)]}}
+        data, _ = fetch(tables)
+        self.assertIn(("(no service)", "Something"), rows_of(data, "service"))
+        self.assertIn(("aaaa-1", "(no service)"), rows_of(data, "subscription"))
+        self.assertIn(("us central", "(no service)"), rows_of(data, "region"))
+        aztree.summarize(data)
+
+    def test_advisor_error_keeps_only_the_status(self):
+        router = Router(ONE_SUB)
+
+        def send(method, url, data, headers):
+            if "Microsoft.Advisor" in url:
+                return error(403, "AuthorizationFailed", "The client 'milan@contoso.com' with object id '0000-1111' "
+                                                         "does not have authorization")
+            return router(method, url, data, headers)
+
+        data = aztree.fetch(client(send), [aztree.subscription_target(PROD)], 3, "ActualCost", advisor=True,
+                            log=lambda *a: None, today=TODAY)
+        self.assertEqual(data["advisor_error"], "HTTP 403")
+        self.assertNotIn("contoso", json.dumps(aztree.summarize(data)))
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_subscription_level_tip_jumps_to_the_subscription(self):
+        rec = {"problem": "Consider a savings plan", "solution": "", "resource": "/subscriptions/aaaa-1",
+               "resource_name": "acme-prod", "sku": "Compute_Savings_Plan", "term": "P1Y", "annual_savings": 3120.0,
+               "currency": "USD", "subscription": "acme-prod", "impact": "High", "resource_type": None}
+        page = ViewerTest.run_page(self, make_data([("SQL Database", "vCore", [10] * 6)], advisor=[rec]), "service",
+                                   click="[data-rec]:0")
+        self.assertIn("all subscriptions", page["crumbs"])
+        self.assertIn('<div class="sel-name">acme-prod</div>', page["side"])
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_advisor_errors_other_than_access_say_what_happened(self):
+        page = ViewerTest.run_page(self, make_data([("Storage", "LRS", [1] * 6)], advisor=[], advisor_error="HTTP 500"), "service")
+        self.assertNotIn("needs Reader", page["side"])
+        self.assertIn("HTTP 500", page["side"])
+
+    render = ViewerTest.render
 
 
 class ExplainTest(unittest.TestCase):

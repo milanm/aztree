@@ -410,7 +410,10 @@ function advisorPanel() {
   const recs = DATA.advisor;
   if (!recs) return "";
   if (!recs.length) {
-    const why = DATA.advisor_error ? "Advisor wasn't readable with this login (needs Reader)." : "Advisor has no cost recommendations.";
+    const err = DATA.advisor_error;
+    const why = !err ? "Advisor has no cost recommendations."
+      : /^HTTP 40[13]\b/.test(err) ? "Advisor wasn't readable with this login (needs Reader)."
+      : `Advisor couldn't be read (${esc(err)}).`;
     return `<section class="foot"><div class="h">Advisor</div><div class="note">${why}</div></section>`;
   }
   const top = recs.slice(0, SHOWN_RECS), max = Math.max(...top.map(r => r.annual_savings || 0), 1);
@@ -498,8 +501,9 @@ $("#side").addEventListener("click", e => {
     const leaf = worthALook()[+h.dataset.hint].n;
     reveal("service", n => n.kind === "leaf" && n.key === leaf.key && n.parent.key === leaf.parent.key);
   } else if (r) {
-    const rec = DATA.advisor[+r.dataset.rec];
+    const rec = DATA.advisor[+r.dataset.rec], sub = (rec.resource.match(/^\/subscriptions\/([^/]+)$/) || [])[1];
     if (/\/resourcegroups\//.test(rec.resource)) reveal("resource", n => n.key === rec.resource);
+    else if (sub) reveal("subscription", n => n.kind === "group" && n.key.toLowerCase() === sub);  // reservations, savings plans
   }
 });
 document.addEventListener("keydown", e => {

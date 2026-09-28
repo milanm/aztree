@@ -24,7 +24,7 @@ The page opens in your browser. It shows the last 30 days, compared with the 30 
 - **Color by change** (`c`): red where spend grew, green where it shrank.
 - **Selection panel:** cost, share of the bill, change vs the previous period, monthly pace and a daily chart.
 - **Worth a look:** the fastest-growing costs plus common Azure money pits: Log Analytics ingestion, data transfer out, NAT and Firewall data processing, Basic and idle public IPs, disk snapshots, previous-generation VM sizes, Premium v2 App Service plans and Extended Security Updates.
-- **Advisor:** Azure Advisor's cost recommendations (reservations, savings plans, right-sizing), one per resource and SKU. Click one to jump to its resource.
+- **Advisor:** Azure Advisor's cost recommendations (reservations, savings plans, right-sizing), one per resource and SKU. Click one to jump to the resource or subscription it's about.
 - **Export for AI:** a JSON summary to hand to any AI agent (see below).
 
 Click to select, double-click to zoom in, `⌫` to go back up, `/` to filter. Add `#resource`, `#subscription` or `#region` to the page's URL to open that view.
@@ -33,7 +33,7 @@ Click to select, double-click to zoom in, `⌫` to go back up, `/` to filter. Ad
 
 - Python 3.8+ and the [Azure CLI](https://aka.ms/azcli), logged in with `az login`. No CLI? Put a token for `https://management.azure.com/` in `AZURE_ACCESS_TOKEN` and name the subscriptions with `--subscription` or `--all`.
 - The **Cost Management Reader** role (or Reader) on each subscription. Advisor tips need Reader; without it you still get the page.
-- Tested on a CSP subscription. Pay-as-you-go and Visual Studio subscriptions use the same API. EA and MCA billing scopes should work through `--scope`, but nobody has tried yet.
+- Tested on a CSP subscription. Pay-as-you-go and Visual Studio subscriptions use the same API. EA and MCA billing scopes should work through `--scope`, but nobody has tried yet. At such a scope the subscription view shows the whole scope as one box, and Advisor is skipped.
 
 **Cost:** Cost Management queries are free. Azure throttles them per subscription, so a run makes about 7–10 requests per subscription and may wait 30–60 seconds when Azure asks it to. aztree saves the data, so reopening the page is instant:
 

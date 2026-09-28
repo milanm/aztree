@@ -31,6 +31,8 @@ ARM = "https://management.azure.com"
 API_VERSION = "2025-03-01"  # Microsoft.CostManagement/query
 MAX_TRIES = 8  # per request, when Cost Management throttles us
 MAX_RESOURCE_PAGES = 10  # past this, the resource view drops from single resources to services
+# What to sum, in order of preference. Some scopes reject USD columns, and older offers only know PreTaxCost.
+AGGREGATIONS = [["Cost", "CostUSD"], ["Cost"], ["PreTaxCost", "PreTaxCostUSD"], ["PreTaxCost"]]
 
 # Each view is outer box -> inner box. A query can group by two dimensions at most, so the
 # subscription view is not queried: every query runs per subscription and call 1 feeds it too.
@@ -97,10 +99,14 @@ def pick_subscriptions(available, wanted, all_, current):
         return [{"id": current["id"], "name": current["name"]}]
     picked = []
     for w in wanted:
-        hit = next((s for s in available if w.lower() in (s["id"].lower(), s["name"].lower())), None)
-        if not hit:
+        hits = [s for s in available if w.lower() in (s["id"].lower(), s["name"].lower())]
+        if not hits:
             known = "\n    ".join(f"{s['name']}  ({s['id']})" for s in available) or "(none)"
             die(f"no subscription matches '{w}'. Subscriptions you can read:\n    {known}")
+        if len(hits) > 1:
+            ids = "\n    ".join(s["id"] for s in hits)
+            die(f"{len(hits)} subscriptions are named '{w}'. Pass the one you mean by id:\n    {ids}")
+        hit = hits[0]
         if all(p["id"] != hit["id"] for p in picked):
             picked.append({"id": hit["id"], "name": hit["name"]})
     return picked
@@ -144,7 +150,15 @@ class Azure:
         data = json.dumps(body).encode() if body is not None else None
         headers = {"Authorization": "Bearer " + self.token, "Content-Type": "application/json"}
         for attempt in range(1, MAX_TRIES + 1):
-            status, resp_headers, raw = self.send(method, url, data, headers)
+            try:
+                status, resp_headers, raw = self.send(method, url, data, headers)
+            except OSError as e:  # URLError, timeouts, resets: the network, not Azure, said no
+                reason = getattr(e, "reason", e)
+                if attempt == MAX_TRIES:
+                    raise AzureError(0, f"network error: {reason}") from e
+                self.log(f"    network error ({reason}); retrying in {5 * attempt}s ...")
+                self.sleep(5 * attempt)
+                continue
             self.requests += 1
             if self.verbose:
                 qpu = {k.lower(): v for k, v in resp_headers.items()}.get("x-ms-ratelimit-microsoft.costmanagement-qpu-consumed")
@@ -176,6 +190,8 @@ def explain(e):
         hints.append("You need the Cost Management Reader (or Reader) role on the subscription or scope.")
     if e.status == 429:
         hints.append("Cost Management kept throttling. Wait a minute and try again, or read fewer subscriptions.")
+    if e.status == 0:
+        hints.append("Check your network connection and try again.")
     return f"Azure error: {e}" + ("\n  -> " + "\n  -> ".join(hints) if hints else "")
 
 
@@ -200,6 +216,8 @@ def query(az, scope, start, end, groupings, metric, aggs=("Cost", "CostUSD"), ma
             raise TooManyPages(f"more than {max_pages} pages")
         props = az.call("POST", url, body).get("properties", {})
         cols = [c["name"] for c in props.get("columns", [])]
+        if cols and aggs[0] not in cols:
+            raise AzureError(0, f"Cost Management answered without a {aggs[0]} column (columns: {', '.join(cols)})")
         rows += [dict(zip(cols, r)) for r in props.get("rows", [])]
         url = props.get("nextLink")
     return rows
@@ -237,31 +255,33 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None):
     index = {d.replace("-", ""): i for i, d in enumerate(dates)}
     raw = {v: [] for v in VIEWS}  # (key, day index, cost, cost in USD), folded once the currency is known
     names = {v: {} for v in VIEWS}
-    aggs = ["Cost", "CostUSD"]
+    aggs = list(AGGREGATIONS)  # aggs[0] is what this run asks for; a scope that rejects it moves us down the list
     subs, fallback = [], []
+    twins = Counter(t["name"] for t in targets)  # "Pay-As-You-Go" twice needs the id to tell them apart
+    targets = [{**t, "name": f"{t['name']} ({t['id'][:8]})"} if twins[t["name"]] > 1 else t for t in targets]
 
     def run(target, groupings, **kw):
-        nonlocal aggs
-        try:
-            return query(az, target["scope"], dates[0], dates[-1], groupings, metric, aggs, **kw)
-        except AzureError as e:
-            if e.status != 400 or len(aggs) == 1:
-                raise
-            aggs = ["Cost"]  # this scope can't report USD: billing currency only from here on
-            return query(az, target["scope"], dates[0], dates[-1], groupings, metric, aggs, **kw)
+        while True:
+            try:
+                return query(az, target["scope"], dates[0], dates[-1], groupings, metric, aggs[0], **kw)
+            except AzureError as e:
+                if e.status != 400 or len(aggs) == 1:
+                    raise
+                aggs.pop(0)
 
     def add(view, key, r):
         i = index.get(usage_day(r.get("UsageDate")))
         if i is not None:
-            raw[view].append((key, i, r.get("Cost") or 0.0, r.get("CostUSD")))
+            cost, cost_usd = r.get("Cost", r.get("PreTaxCost")), r.get("CostUSD", r.get("PreTaxCostUSD"))
+            raw[view].append((key, i, cost or 0.0, cost_usd))
 
     for t in targets:
         log(f"  {t['name']}: services ...")
         currencies = Counter()
         for r in run(t, VIEWS["service"]):
             currencies[r.get("Currency")] += 1
-            add("service", (r["ServiceName"], r.get("Meter") or "(no meter)"), r)
-            add("subscription", (t["id"], r["ServiceName"]), r)
+            add("service", (service_of(r), r.get("Meter") or "(no meter)"), r)
+            add("subscription", (t["id"], service_of(r)), r)
         names["subscription"][t["id"]] = t["name"]
 
         log(f"  {t['name']}: resources ...")
@@ -276,29 +296,29 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None):
             key = group_key(t, rg, rid)
             label = rg or "(no resource group)"
             names["resource"][key] = f"{label} · {t['name']}" if len(targets) > 1 else label
-            add("resource", (key, (rid or "(no resource)") if leaf == "ResourceId" else r["ServiceName"]), r)
+            add("resource", (key, (rid or "(no resource)") if leaf == "ResourceId" else service_of(r)), r)
 
         log(f"  {t['name']}: regions ...")
         for r in run(t, VIEWS["region"]):
-            add("region", ((r.get("ResourceLocation") or "").lower(), r["ServiceName"]), r)
+            add("region", ((r.get("ResourceLocation") or "").lower(), service_of(r)), r)
         subs.append({"id": t["id"], "name": t["name"], "currency": next((c for c, _ in currencies.most_common() if c), None)})
 
     recs, advisor_error = None, None
-    if advisor:
+    with_advisor = [t for t in targets if t["scope"].lower().startswith("/subscriptions/")]  # Advisor is per subscription
+    if advisor and with_advisor:
         recs = []
-        for t in targets:
-            if not t["scope"].lower().startswith("/subscriptions/"):
-                continue
+        for t in with_advisor:
             log(f"  {t['name']}: Advisor ...")
             try:
                 recs += advisor_recs(az, t)
-            except AzureError as e:  # Advisor needs Reader; cost data alone is still worth a page
-                advisor_error = str(e)
-                log(f"  {t['name']}: skipped Advisor ({e}). Reader on the subscription fixes that; --no-advisor hides this.")
+            except Exception as e:  # Advisor needs Reader; cost data alone is still worth a page
+                # keep only the status: Azure's 403 text names the caller, and this lands in the AI export
+                advisor_error = f"HTTP {e.status}" if isinstance(e, AzureError) else type(e).__name__
+                log(f"  {t['name']}: skipped Advisor ({e}). Reader on the subscription fixes access errors; --no-advisor hides this.")
         recs.sort(key=lambda r: -(r["annual_savings"] or -1))
 
     found = {s["currency"] for s in subs if s["currency"]}
-    usd = len(found) > 1 and "CostUSD" in aggs
+    usd = len(found) > 1 and any(a.endswith("USD") for a in aggs[0])
     if len(found) > 1 and not usd:
         log("  warning: these subscriptions bill in different currencies and Azure won't convert them; totals mix currencies")
     log(f"  done: {az.requests} requests (Cost Management queries are free)")
@@ -309,6 +329,10 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None):
         "subscriptions": subs, "resource_fallback": fallback,
         "advisor": recs, "advisor_error": advisor_error, "demo": False,
     }
+
+
+def service_of(row):
+    return row.get("ServiceName") or "(no service)"
 
 
 def fold(entries, n, usd):
