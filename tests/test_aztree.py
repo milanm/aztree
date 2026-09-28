@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -7,8 +8,10 @@ import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
 import aztree  # noqa: E402
 
 SUBS = [
@@ -634,7 +637,7 @@ class SummarizeTest(unittest.TestCase):
             self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["line_items"][0]["meter"], "Snapshots · Zürich")
 
 
-TEMPLATE = (Path(__file__).resolve().parent.parent / "viewer.html").read_text(encoding="utf-8")
+TEMPLATE = (REPO / "aztree" / "viewer.html").read_text(encoding="utf-8")
 
 # Runs the viewer's script in Node against a bare-bones DOM: enough to prove each view draws boxes
 # and fills the side panel, without a browser.
@@ -787,19 +790,31 @@ class MainTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             quiet(self.main, "--from", str(self.saved), "--days", "184")
 
-    def test_entry_point_is_the_last_statement(self):
-        # Run as a script, main() only sees what is defined above the __main__ guard.
-        import ast
-        last = ast.parse(Path(aztree.__file__).read_text(encoding="utf-8")).body[-1]
-        self.assertIsInstance(last, ast.If)
-        self.assertIn("__main__", ast.unparse(last.test))
+    def run_module(self, *args, cwd=None):
+        env = dict(os.environ, PYTHONPATH=str(REPO))
+        return aztree.subprocess.run([sys.executable, "-m", "aztree", *args], capture_output=True, text=True,
+                                     encoding="utf-8", cwd=cwd or REPO, env=env)
 
-    def test_runs_as_a_script(self):
+    def test_runs_as_a_module(self):
         target = self.dir / "summary.json"
-        r = aztree.subprocess.run([sys.executable, aztree.__file__, "--from", str(self.saved), "--export", str(target)],
-                                  capture_output=True, text=True)
+        r = self.run_module("--from", str(self.saved), "--export", str(target))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(target.exists())
+
+    def test_template_loads_from_any_directory(self):
+        page = self.dir / "page.html"
+        r = self.run_module("--from", str(self.saved), "--out", str(page), "--no-open", cwd=self.dir)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('"tool":"aztree"', page.read_text(encoding="utf-8"))
+
+    def test_version(self):
+        out = io.StringIO()
+        from contextlib import redirect_stdout
+        with redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
+            aztree.main(["--version"])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertEqual(out.getvalue().strip(), f"aztree {aztree.__version__}")
+        self.assertRegex(aztree.__version__, r"^\d+\.\d+\.\d+$")
 
     def test_scope_and_subscription_do_not_mix(self):
         with self.assertRaises(SystemExit):

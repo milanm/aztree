@@ -1,11 +1,13 @@
-#!/usr/bin/env python3
 """aztree: see where your Azure money goes, as a disktree-style treemap.
 
-    python3 aztree.py            # read your Azure costs (last 30 days) and open the map
-    python3 aztree.py --demo     # fake data, no Azure needed
+    aztree                # read your Azure costs (last 30 days) and open the map
+    aztree --demo         # fake data, no Azure needed
+    python -m aztree      # the same, from a clone without installing
 
 Needs a logged-in Azure CLI (`az login`), or a token in AZURE_ACCESS_TOKEN. No other dependencies.
 """
+__version__ = "0.2.0"
+
 import argparse
 import datetime as dt
 import json
@@ -21,11 +23,16 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from collections import Counter
+from importlib import resources
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-TEMPLATE = HERE / "viewer.html"
 OUT = HERE / "out"  # everything generated goes here (git-ignored: it contains your subscription IDs and costs)
+
+
+def template():
+    """The page, shipped inside the package (works from a clone, a wheel or a zip)."""
+    return resources.files(__name__).joinpath("viewer.html").read_text(encoding="utf-8")
 
 ARM = "https://management.azure.com"
 API_VERSION = "2025-03-01"  # Microsoft.CostManagement/query
@@ -713,7 +720,7 @@ def export(data, path):
 # ---------------------------------------------------------------- output
 
 def render(data, out):
-    html = TEMPLATE.read_text(encoding="utf-8")
+    html = template()
     page = {**data, "pits": PITS, "export": summarize(data)}
     # < keeps names like "</script>" or "<!--" from ending the script block early
     blob = json.dumps(page, separators=(",", ":"), ensure_ascii=False).replace("<", "\\u003c")
@@ -733,7 +740,8 @@ def main(argv=None):
     for stream in (sys.stdout, sys.stderr):  # subscription names can hold characters a Windows pipe can't encode
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="replace")
-    ap = argparse.ArgumentParser(description="See where your Azure money goes, as a treemap.")
+    ap = argparse.ArgumentParser(prog="aztree", description="See where your Azure money goes, as a treemap.")
+    ap.add_argument("--version", action="version", version=f"aztree {__version__}")
     ap.add_argument("--demo", action="store_true", help="use fake data (no Azure access needed)")
     who = ap.add_mutually_exclusive_group()
     who.add_argument("--subscription", action="append", default=[], metavar="ID_OR_NAME",
@@ -787,7 +795,3 @@ def main(argv=None):
     print(f"aztree: wrote {out}")
     if not args.no_open:
         webbrowser.open(out.as_uri())
-
-
-if __name__ == "__main__":
-    main()
