@@ -224,18 +224,22 @@ class Router:
     """Fake Cost Management: answers each query from `tables[(dim1, dim2)][scope]`, a list of
     (usage_date, value1, value2, cost, currency, cost_usd) tuples."""
 
-    def __init__(self, tables, explode=(), reject_usd=False, reject=(), reject_for=None):
+    def __init__(self, tables, explode=(), reject_usd=False, reject=(), reject_for=None, fail=None):
         self.tables, self.explode = tables, explode
         self.reject = set(reject) | ({"CostUSD"} if reject_usd else set())
         self.reject_for = reject_for or {}  # scope -> aggregations only that scope refuses
-        self.bodies = []
+        self.fail = fail or {}  # (dim1, dim2) -> error message answered with HTTP 400
+        self.bodies, self.calls = [], []
 
     def __call__(self, method, url, data, headers):
         body = json.loads(data)
         self.bodies.append(body)
-        dims = tuple(g["name"] for g in body["dataset"]["grouping"])
+        dims = tuple(g["name"] for g in body["dataset"].get("grouping", []))
         aggs = [a["name"] for a in body["dataset"]["aggregation"].values()]
         scope = url.split("/providers/Microsoft.CostManagement")[0][len(aztree.ARM):]
+        self.calls.append((scope, dims, aggs))
+        if dims in self.fail:
+            return error(400, "BadRequest", self.fail[dims])
         refused = (self.reject | set(self.reject_for.get(scope, ()))) & set(aggs)
         if refused:
             return error(400, "BadRequest", f"Invalid aggregation {sorted(refused)}")
@@ -272,7 +276,7 @@ DEV = {"id": "bbbb-2", "name": "acme-dev"}
 
 
 def fetch(tables, targets=(PROD,), **kw):
-    router = Router(tables, **{k: kw.pop(k) for k in ("explode", "reject_usd", "reject", "reject_for") if k in kw})
+    router = Router(tables, **{k: kw.pop(k) for k in ("explode", "reject_usd", "reject", "reject_for", "fail") if k in kw})
     data = aztree.fetch(client(router), [aztree.subscription_target(t) for t in targets], 3, "ActualCost",
                         advisor=False, log=lambda *a: None, today=TODAY)
     return data, router
@@ -1071,6 +1075,23 @@ class SecondReviewTest(unittest.TestCase):
                 self.assertIn(".leaf.sel", rule[0])
 
     render = ViewerTest.render
+
+
+class Batch1Test(unittest.TestCase):
+    def test_an_unrelated_400_is_not_retried_with_other_columns(self):
+        router = Router(ONE_SUB, fail={("ResourceGroupName", "ResourceId"): "Grouping by ResourceId is not supported here"})
+        with self.assertRaises(aztree.AzureError):
+            aztree.fetch(client(router), [aztree.subscription_target(PROD)], 3, "ActualCost", advisor=False,
+                         log=lambda *a: None, today=TODAY)
+        tries = [c for c in router.calls if c[1] == ("ResourceGroupName", "ResourceId")]
+        self.assertEqual(len(tries), 1)
+
+    def test_each_subscription_starts_from_the_best_columns(self):
+        tables = {("ServiceName", "Meter"): {"/subscriptions/aaaa-1": [(20260925, "Storage", "LRS", 1.0, "USD", None)],
+                                             "/subscriptions/bbbb-2": [(20260925, "Storage", "LRS", 1.0, "USD", None)]}}
+        _, router = fetch(tables, targets=(PROD, DEV), reject_for={"/subscriptions/aaaa-1": {"CostUSD"}})
+        first_dev = next(c for c in router.calls if c[0] == "/subscriptions/bbbb-2")
+        self.assertEqual(first_dev[2], ["Cost", "CostUSD"])
 
 
 @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")

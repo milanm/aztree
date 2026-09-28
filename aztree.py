@@ -275,18 +275,21 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None):
     index = {d.replace("-", ""): i for i, d in enumerate(dates)}
     raw = {v: [] for v in VIEWS}  # (key, day index, cost, cost in USD), folded once the currency is known
     names = {v: {} for v in VIEWS}
-    aggs = list(AGGREGATIONS)  # aggs[0] is what this run asks for; a scope that rejects it moves us down the list
+    columns = {}  # target id -> cost columns that target accepts, best first; every subscription starts at the top
     subs, fallback = [], []
     twins = Counter(t["name"] for t in targets)  # "Pay-As-You-Go" twice needs the id to tell them apart
     targets = [{**t, "name": f"{t['name']} ({t['id'][:8]})"} if twins[t["name"]] > 1 else t for t in targets]
 
     def run(target, groupings, **kw):
+        aggs = columns.setdefault(target["id"], list(AGGREGATIONS))
         while True:
             try:
                 return query(az, target["scope"], dates[0], dates[-1], groupings, metric, aggs[0],
                              tenant=target.get("tenant"), **kw)
             except AzureError as e:
-                if e.status != 400 or len(aggs) == 1:
+                # step down only when Azure objects to the cost columns; any other 400 is a real error
+                about_columns = "aggregation" in str(e).lower() or any(a.lower() in str(e).lower() for a in aggs[0])
+                if e.status != 400 or len(aggs) == 1 or not about_columns:
                     raise
                 aggs.pop(0)
 
