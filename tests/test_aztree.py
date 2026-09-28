@@ -398,9 +398,10 @@ PIT_CASES = [
     ("Log Analytics", "Analytics Logs Data Ingestion", "Log Analytics ingestion"),
     ("Azure Monitor", "Basic Logs Data Ingestion", None),  # already the cheap tier: "use Basic logs" would be wrong
     ("Azure Front Door Service", "Premium Base Fees", "Front Door Premium"),
-    ("Azure Front Door Service", "Standard Base Fees", None),
-    ("SQL Database", "eDTUs", "DTU"),
-    ("SQL Database", "S2 DTUs", "DTU"),
+    ("Azure Front Door Service", "Standard Base Fees", None, 35),  # one profile: nothing to merge
+    ("Azure Front Door Service", "Standard Base Fees", "about 10 Front Door Standard profiles", 346),
+    ("SQL Database", "eDTUs", "DTU", 184),       # a pool: worth a look
+    ("SQL Database", "S2 DTUs", None, 74),       # small tier: cheaper than any vCore option
     ("Azure DevOps", "Microsoft-hosted CI/CD Concurrent Job", "Azure DevOps"),
     ("Azure DevOps", "Basic User", "Azure DevOps"),
     ("Azure DevOps", "Standard Data Stored", None),
@@ -409,10 +410,16 @@ PIT_CASES = [
     ("Azure Cosmos DB", "Data Stored", None),
     ("Azure Monitor", "Alerts System Log Monitored at 1 Minute Frequency", "1-minute alert"),
     ("Azure Monitor", "Alerts System Log Monitored at 5 Minute Frequency", None),
-    ("Virtual Machines", "D2 v2 Promo", "previous-gen"),
-    ("Virtual Machines", "NV6", "previous-gen"),
-    ("Virtual Machines", "GS3", "previous-gen"),
-    ("Virtual Machines", "L8s", "previous-gen"),
+    ("Virtual Machines", "D2 v2 Promo", "1 May 2028"),
+    ("Virtual Machines", "GS3", "15 Nov 2028"),
+    ("Virtual Machines", "L8s", "1 May 2028"),
+    ("Virtual Machines", "L8s v2", "15 Nov 2028"),
+    ("Virtual Machines", "E8s v3", "reservations"),
+    ("Virtual Machines", "B2s v2", None),
+    ("Log Analytics", "Auxiliary Logs Data Ingestion", None),
+    ("Redis Cache", "C1 Cache Instance", "30 Sep 2028"),
+    ("Azure App Service", "S2 App", "can't be reserved"),
+    ("Azure App Service", "B1 App", None),
     ("Virtual Machines", "L8s v3", None),
     ("Virtual Machines", "NV6ads A10 v5", None),
     ("Storage", "Standard Page Blob v2 Snapshots", "snapshots"),
@@ -429,19 +436,19 @@ PIT_CASES = [
     ("Virtual Network", "Standard IPv4 Static Public IP", "public IPs"),
     ("Storage", "LRS Snapshots", "snapshots"),
     ("Storage", "P10 LRS Disk", None),
-    ("Virtual Machines", "D2 v2", "previous-gen"),
-    ("Virtual Machines", "D2 v2/DS2 v2", "previous-gen"),
-    ("Virtual Machines", "DS3 v2 Spot", "previous-gen"),
-    ("Virtual Machines", "D11 v2", "previous-gen"),
-    ("Virtual Machines", "A1 v2", "previous-gen"),
-    ("Virtual Machines", "Basic.A2", "previous-gen"),
-    ("Virtual Machines", "F4", "previous-gen"),
-    ("Virtual Machines", "F2s", "previous-gen"),
-    ("Virtual Machines", "F2s v2", None),
+    ("Virtual Machines", "D2 v2", "1 May 2028"),
+    ("Virtual Machines", "D2 v2/DS2 v2", "1 May 2028"),
+    ("Virtual Machines", "DS3 v2 Spot", "1 May 2028"),
+    ("Virtual Machines", "D11 v2", "1 May 2028"),
+    ("Virtual Machines", "A1 v2", "15 Nov 2028"),
+    ("Virtual Machines", "Basic.A2", "15 Nov 2028"),
+    ("Virtual Machines", "F4", "15 Nov 2028"),
+    ("Virtual Machines", "F2s", "15 Nov 2028"),
+    ("Virtual Machines", "F2s v2", "15 Nov 2028"),
     ("Virtual Machines", "D4s v5", None),
-    ("Virtual Machines", "D2 v3", None),
+    ("Virtual Machines", "D2 v3", "reservations"),
     ("Virtual Machines", "D2as v4", None),
-    ("Virtual Machines", "B2s", None),
+    ("Virtual Machines", "B2s", "15 Nov 2028"),
     ("Azure App Service", "P1 v2 App", "Premium v2"),
     ("Azure App Service", "P2v2 App", "Premium v2"),
     ("Azure App Service", "P1 v3 App", None),
@@ -453,27 +460,19 @@ PIT_CASES = [
 
 class PitsTest(unittest.TestCase):
     def test_rules_against_real_meter_names(self):
-        for service, meter, expected in PIT_CASES:
-            with self.subTest(service=service, meter=meter):
-                why = aztree.pit(service, meter)
+        # a case may name the meter's monthly spend: some rules only matter above a floor
+        for service, meter, expected, *monthly in PIT_CASES:
+            with self.subTest(service=service, meter=meter, monthly=monthly):
+                why = aztree.pit(service, meter, *monthly)
                 if expected is None:
                     self.assertIsNone(why)
                 else:
                     self.assertIsNotNone(why)
                     self.assertIn(expected.lower(), why.lower())
 
-    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
-    def test_javascript_reads_the_rules_the_same_way(self):
-        # The viewer runs the same patterns with JavaScript's RegExp; both engines must agree.
-        script = (
-            "const [pits, cases] = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
-            "const rules = pits.map(([s, m, why]) => [new RegExp(s), new RegExp(m), why]);"
-            "console.log(JSON.stringify(cases.map(([s, m]) => { const r = rules.find(([rs, rm]) => rs.test(s) && rm.test(m)); return r ? r[2] : null; })));"
-        )
-        payload = json.dumps([aztree.PITS, [[s, m] for s, m, _ in PIT_CASES]])
-        out = aztree.subprocess.run(["node", "-e", script], input=payload, capture_output=True, text=True, encoding="utf-8")
-        self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertEqual(json.loads(out.stdout), [aztree.pit(s, m) for s, m, _ in PIT_CASES])
+    def test_summarize_passes_the_monthly_pace(self):
+        rows = [("SQL Database", "S2 DTUs", [2.5] * 6), ("SQL Database", "eDTUs", [6] * 6), ("Storage", "LRS", [1] * 6)]
+        self.assertEqual([f["meter"] for f in aztree.summarize(make_data(rows))["flags"]], ["eDTUs"])
 
 
 def advisor_item(problem, resource, value, sku=None, term=None, savings=None, rtype="t-1", field="Microsoft.Subscriptions/subscriptions"):

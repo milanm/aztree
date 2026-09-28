@@ -526,36 +526,55 @@ def demo(days, today=None):
 
 # ---------------------------------------------------------------- worth a look
 
-# Known money pits: (service pattern, meter pattern, why). First match wins. Shared with the viewer's
-# "worth a look" panel, so the patterns must mean the same in Python and JavaScript.
-OLD_VM_SIZES = r"^(?:(?:Basic[ ._])?A\d+m?(?: v2)?|DS?\d+(?: v2)?|F\d+s?|NV\d+|GS?\d+|L\d+s)(?:$|/| Low Priority| Spot| Promo)"
+# Known money pits: (service pattern, meter pattern, why, monthly floor). First match wins; a rule with a floor only
+# fires once the meter runs at least that much a month. `{profiles}` in a reason is filled in from the monthly amount.
+VM_END = r"(?:$|/| Low Priority| Spot| Promo)"
+RETIRING_MAY_2028 = r"^(?:DS?\d+(?: v2)?|L\d+s)" + VM_END  # D, Ds, Dv2, Dsv2, Ls
+RETIRING_NOV_2028 = r"^(?:(?:Basic[ ._])?A\d+m?(?: v2)?|F\d+s?(?: v2)?|L\d+s v2|GS?\d+|B\d+[a-z]*)" + VM_END  # Av2, F*, Lsv2, G*, B v1
+NO_NEW_RESERVATIONS = r"^[DE]\d+s? v3" + VM_END  # Dv3, Dsv3, Ev3, Esv3
 PITS = [
-    (r"^(?:Log Analytics|Azure Monitor)$", r"^(?!Basic ).*Data Ingestion",
-     "Log Analytics ingestion — trim noisy tables, use Basic logs, or a commitment tier past 100 GB/day"),
+    (r"^(?:Log Analytics|Azure Monitor)$", r"^(?!Basic |Auxiliary ).*Data Ingestion",
+     "Log Analytics ingestion — trim noisy tables, use Basic logs, or a commitment tier past 100 GB/day", 0),
     (r"^Azure Front Door Service$", r"^Premium Base Fees",
      "Front Door Premium — Standard is about $35 a month against about $330; Premium is only needed for managed "
-     "WAF rules or Private Link origins"),
-    (r"^SQL Database$", r"DTUs?$", "DTU databases — vCore can be reserved and use Azure Hybrid Benefit; serverless pauses when idle"),
+     "WAF rules or Private Link origins", 0),
+    (r"^Azure Front Door Service$", r"^Standard Base Fees",
+     "about {profiles} Front Door Standard profiles at $35 a month each; one profile can hold many endpoints and domains", 70),
+    (r"^SQL Database$", r"DTUs?$",  # below ~$150 a month a DTU database is cheaper than any provisioned vCore option
+     "DTU databases — vCore can be reserved and use Azure Hybrid Benefit; serverless pauses when idle", 150),
     (r"^Azure DevOps$", r"Concurrent Job|Basic User",
-     "Azure DevOps seats and hosted jobs — the first 5 Basic users are free; remove inactive users, check pipeline concurrency"),
-    (r"^Virtual Network$", r"Private Endpoint", "private endpoints — $0.01 an hour each plus data; remove the ones nothing uses"),
-    (r"^Azure Cosmos DB$", r"^100 RU/s$", "provisioned Cosmos DB throughput — autoscale or serverless costs less when load varies"),
+     "Azure DevOps seats and hosted jobs — the first 5 Basic users are free; remove inactive users, check pipeline concurrency", 0),
+    (r"^Virtual Network$", r"Private Endpoint", "private endpoints — $0.01 an hour each plus data; remove the ones nothing uses", 0),
+    (r"^Azure Cosmos DB$", r"^100 RU/s$", "provisioned Cosmos DB throughput — autoscale or serverless costs less when load varies", 0),
     (r"^Azure Monitor$", r"at 1 Minute Frequency", "1-minute alert rules — they cost more than 5- or 15-minute ones; relax the ones "
-     "where minutes don't matter"),
-    (r"^Bandwidth$", r"Data Transfer Out", "data transfer out — keep traffic in one region, cache at the edge"),
-    (r"^NAT Gateway$", r"Data Processed", "NAT data processing — service or private endpoints for Storage, SQL and ACR skip it"),
-    (r"^Azure Firewall$", r"Data Processed|Premium", "Azure Firewall — processing and Premium add up; route only what needs inspection"),
-    (r"^Virtual Network$", r"^Basic .*Public IP", "Basic public IPs — the Basic SKU retired on 30 Sep 2025, move to Standard"),
-    (r"^Virtual Network$", r"Public IP|IP Address Hours", "public IPs — billed per hour each; release the ones nothing uses"),
-    (r"^Storage$", r"Snapshot", "snapshots — prune old ones; incremental snapshots on Standard storage cost less"),
-    (r"^Virtual Machines$", OLD_VM_SIZES, "previous-gen VM sizes — current generations cost less for the same work"),
-    (r"^Azure App Service$", r"^P\d+ ?v2 App", "Premium v2 App Service plans — Premium v3 gives more per dollar and can be reserved"),
-    (r"", r"Extended Security Update", "Extended Security Updates — upgrade the OS or SQL version to stop paying for them"),
+     "where minutes don't matter", 0),
+    (r"^(?:Redis Cache|Azure Cache for Redis)$", r"",
+     "Azure Cache for Redis retires on 30 Sep 2028 (Enterprise tiers on 31 Mar 2027); plan the move to Azure Managed Redis", 0),
+    (r"^Azure App Service$", r"^S\d App$", "Standard App Service plans can't be reserved or use a savings plan; Premium v3 plans can", 0),
+    (r"^Bandwidth$", r"Data Transfer Out", "data transfer out — keep traffic in one region, cache at the edge", 0),
+    (r"^NAT Gateway$", r"Data Processed", "NAT data processing — service or private endpoints for Storage, SQL and ACR skip it", 0),
+    (r"^Azure Firewall$", r"Data Processed|Premium", "Azure Firewall — processing and Premium add up; route only what needs inspection", 0),
+    (r"^Virtual Network$", r"^Basic .*Public IP", "Basic public IPs — the Basic SKU retired on 30 Sep 2025, move to Standard", 0),
+    (r"^Virtual Network$", r"Public IP|IP Address Hours", "public IPs — billed per hour each; release the ones nothing uses", 0),
+    (r"^Storage$", r"Snapshot", "snapshots — prune old ones; incremental snapshots on Standard storage cost less", 0),
+    (r"^Virtual Machines$", RETIRING_MAY_2028,
+     "retiring VM series — D, Ds, Dv2, Dsv2 and Ls stop on 1 May 2028; current generations cost less for the same work", 0),
+    (r"^Virtual Machines$", RETIRING_NOV_2028,
+     "retiring VM series — F, Fs, Fsv2, Lsv2, G, Gs, Av2 and B-series v1 stop on 15 Nov 2028; current generations cost "
+     "less for the same work", 0),
+    (r"^Virtual Machines$", NO_NEW_RESERVATIONS,
+     "Dv3 and Ev3 sizes — new reservations stopped in July 2026; v5 and v6 sizes can still be reserved", 0),
+    (r"^Azure App Service$", r"^P\d+ ?v2 App", "Premium v2 App Service plans — Premium v3 gives more per dollar and can be reserved", 0),
+    (r"", r"Extended Security Update", "Extended Security Updates — upgrade the OS or SQL version to stop paying for them", 0),
 ]
 
 
-def pit(service, meter):
-    return next((why for s, m, why in PITS if re.search(s, service) and re.search(m, meter)), None)
+def pit(service, meter, monthly=0.0):
+    """Why this meter is worth a look, or None. `monthly` is what it runs at a month; some rules have a floor."""
+    for s, m, why, floor in PITS:
+        if re.search(s, service) and re.search(m, meter) and monthly >= floor:
+            return why.format(profiles=round(monthly / 35))
+    return None
 
 
 def advisor_recs(az, target):
@@ -693,7 +712,7 @@ def summarize(data):
 
     flags, todos = [], []
     for x in line_items:  # biggest first
-        why = pit(x["service"], x["meter"])
+        why = pit(x["service"], x["meter"], x["current"] / n * 30.4)
         if why and x["current"] >= grand * 0.002:
             flags.append({"service": x["service"], "meter": x["meter"], "current": x["current"], "reason": why})
             todos.append(hint("pit", x, x["current"], reason=why))
