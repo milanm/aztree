@@ -667,6 +667,39 @@ def spike(daily, split, floor):
     return best
 
 
+# Dev/test by name: a whole word (tms-dev-rg, acme-staging), not a substring (devices, contest).
+DEV_TEST = re.compile(r"(?:^|[-_ .])(?:dev|tst|test|stg|staging|stage|qa|uat|sbx|sandbox|nonprod|preprod)(?:[-_ .0-9]|$)", re.I)
+# Compute that bills by the hour whether used or not, and can be scaled down, stopped or made serverless.
+ALWAYS_ON = re.compile(r"/providers/microsoft\.(?:compute/(?:virtualmachines|virtualmachinescalesets)|web/serverfarms"
+                       r"|sql/servers/[^/]+/(?:databases|elasticpools)|documentdb/databaseaccounts"
+                       r"|containerservice/managedclusters)/", re.I)
+
+
+def always_on(data, floor):
+    """Dev/test resource groups whose compute runs flat all period (lowest day at least 90% of the highest):
+    one hint per group. Needs daily data, so nothing when the resource view has period totals only."""
+    if data.get("resource_fallback"):
+        return []
+    view, split = data["views"]["resource"], data["split"]
+    subs = {s["id"].lower(): s["name"] for s in data.get("subscriptions", [])}
+    groups = {}
+    for r in view["rows"]:
+        key, rid = r["k"]
+        cur = r["d"][split:]
+        if not ALWAYS_ON.search(rid) or min(cur) <= 0 or min(cur) < 0.9 * max(cur):
+            continue
+        label = view["names"].get(key, key)
+        sub = subs.get(key.split("/")[2].lower(), "") if key.startswith("/subscriptions/") else ""
+        if not (DEV_TEST.search(label) or DEV_TEST.search(sub)):
+            continue
+        g = groups.setdefault(key, {"label": label, "current": 0.0, "resources": 0})
+        g["current"] += sum(cur)
+        g["resources"] += 1
+    return [{"kind": "devtest", "group": k, "label": g["label"], "resources": g["resources"],
+             "current": round(g["current"], 2), "amount": round(g["current"], 2)}
+            for k, g in groups.items() if g["current"] >= floor]
+
+
 def summarize(data):
     """Turn the raw daily data into a compact JSON an AI agent can reason about."""
     days, split = data["days"], data["split"]
@@ -753,6 +786,7 @@ def summarize(data):
         if s and tuple(r["k"]) in items:
             spiked[tuple(r["k"])] = hint("spike", items[tuple(r["k"])], s["excess"], date=days[s["day"]],
                                          day=money(r["d"][s["day"]]), usual=money(s["usual"]))
+    todos = sorted(todos + always_on(data, max(10, grand * 0.002)), key=lambda h: -h["amount"])
     flagged = {(f["service"], f["meter"]) for f in flags}
     news = sorted([*spiked.values(), *(hint("grower", x, x["change"]) for x in growing
                                        if (x["service"], x["meter"]) not in flagged | set(spiked))],

@@ -439,11 +439,12 @@ function renderSide() {
 
   const hints = worthALook();
   if (hints.length) {
-    const shown = state.expanded.hints ? hints : hints.slice(0, SHOWN_HINTS), max = Math.max(...shown.map(h => h.n.cur));
-    html += `<section><div class="h">Worth a look <b>${money(hints.reduce((s, h) => s + h.n.cur, 0))}</b></div>` +
+    const shown = state.expanded.hints ? hints : hints.slice(0, SHOWN_HINTS), max = Math.max(...shown.map(h => h.value));
+    // a count, not a sum: a dev/test group's total can include meters that are hints of their own
+    html += `<section><div class="h">Worth a look <b>${hints.length}</b></div>` +
       shown.map((h, i) => `<div class="hint" data-hint="${i}" style="--c:${h.c}">
-        <div class="hn" title="${esc(h.n.full)}">${esc(shortSvc(h.n.parent.key))} · ${esc(h.n.name)}</div><div class="hv">${money(h.n.cur)}</div>
-        <div class="hs" title="${esc(h.why)}">${esc(h.why)}</div><div class="hb"><i style="width:${(h.n.cur / max) * 100}%"></i></div></div>`).join("") +
+        <div class="hn" title="${esc(h.n.full)}">${esc(h.title)}</div><div class="hv">${money(h.value)}</div>
+        <div class="hs" title="${esc(h.why)}">${esc(h.why)}</div><div class="hb"><i style="width:${(h.value / max) * 100}%"></i></div></div>`).join("") +
       showAll("hints", hints.length, SHOWN_HINTS) + `</section>`;
   }
   const drops = biggestDrops();
@@ -497,17 +498,28 @@ function biggestDrops() {
 }
 
 // ---------- worth a look: the hints aztree.py computed (the export's `hints`, in order), placed on the service view
-const HINT_COLOR = { grower: "var(--up)", spike: "var(--up)", pit: "var(--accent)" };
+const HINT_COLOR = { grower: "var(--up)", spike: "var(--up)", pit: "var(--accent)", devtest: "var(--accent)" };
 let _hints;
 function worthALook() {
   if (_hints) return _hints;
   const t = buildTree("service", ""), leaves = new Map();
   for (const g of [...t.children, ...t.gone]) for (const n of [...g.children, ...(g.gone || [])]) leaves.set(`${g.key}\u0000${n.key}`, n);
-  return (_hints = (DATA.export?.hints || [])
-    .map(h => ({ h, n: leaves.get(`${h.service}\u0000${h.meter}`), why: hintText(h), c: HINT_COLOR[h.kind] || "var(--accent)" }))
-    .filter(x => x.n)); // the panel shows the first few; "show all" opens the rest
+  const groups = new Map(DATA.views.resource ? buildTree("resource", "").children.map(g => [g.key, g]) : []);
+  // each hint becomes a row: what it's about, its dollars, and where a click takes you
+  const place = h => {
+    const c = HINT_COLOR[h.kind] || "var(--accent)", why = hintText(h);
+    if (h.kind === "devtest") {
+      const n = groups.get(h.group);
+      return n && { h, n, c, why, title: n.name, value: h.amount, view: "resource", find: m => m.kind === "group" && m.key === h.group };
+    }
+    const n = leaves.get(`${h.service}\u0000${h.meter}`);
+    return n && { h, n, c, why, title: `${shortSvc(n.parent.key)} · ${n.name}`, value: n.cur, view: "service",
+      find: m => m.kind === "leaf" && m.key === n.key && m.parent.key === n.parent.key };
+  };
+  return (_hints = (DATA.export?.hints || []).map(place).filter(Boolean)); // the panel shows the first few; "show all" opens the rest
 }
 function hintText(h) {
+  if (h.kind === "devtest") return `${h.resources} always-on ${h.resources === 1 ? "resource bills" : "resources bill"} all 168 hours a week in this dev/test group; scale down or stop outside working hours, or go serverless`;
   if (h.kind === "grower") return h.previous < 0.01 ? "new this period" : `up ${pct(h.change / h.previous)} (+${money(h.change)}) vs previous ${DAYS}d`;
   if (h.kind === "spike") return `spiked on ${day(h.date)}: ${money(h.day)} vs a usual ${money(h.usual)}/day`;
   return h.reason || "";
@@ -566,7 +578,8 @@ $("#side").addEventListener("click", e => {
   const h = e.target.closest("[data-hint]"), dr = e.target.closest("[data-drop]"), r = e.target.closest("[data-rec]");
   const same = leaf => n => n.kind === "leaf" && n.key === leaf.key && n.parent.key === leaf.parent.key;
   if (h) {
-    reveal("service", same(worthALook()[+h.dataset.hint].n));
+    const x = worthALook()[+h.dataset.hint];
+    reveal(x.view, x.find);
   } else if (dr) {
     const leaf = biggestDrops()[+dr.dataset.drop].n;
     reveal("service", same(leaf));

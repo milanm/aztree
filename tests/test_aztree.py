@@ -1391,6 +1391,55 @@ class SpikeTest(unittest.TestCase):
     render = ViewerTest.render
 
 
+class DevTestTest(unittest.TestCase):
+    DEV = "/subscriptions/aaaa-1/resourcegroups/tms-dev-rg"
+
+    def data(self, group_label="tms-dev-rg", plan=(5,) * 6, group=None, **extra):
+        group = group or self.DEV
+        rows = [(group, f"{group}/providers/microsoft.web/serverfarms/asp-dev", list(plan)),
+                (group, f"{group}/providers/microsoft.sql/servers/s1/elasticpools/pool", [4] * 6),
+                (group, f"{group}/providers/microsoft.storage/storageaccounts/stdev", [2] * 6),  # not compute
+                (RG, f"{RG}/providers/microsoft.web/serverfarms/asp-prod", [9] * 6)]              # not dev/test
+        data = make_data([("Storage", "LRS", [1] * 6)], resource_rows=rows, **extra)
+        data["views"]["resource"]["names"][group] = group_label
+        return data
+
+    def devtest(self, data):
+        return [h for h in aztree.summarize(data)["hints"] if h["kind"] == "devtest"]
+
+    def test_always_on_compute_in_a_dev_group(self):
+        (h,) = self.devtest(self.data())
+        self.assertEqual((h["group"], h["label"], h["resources"], h["amount"]), (self.DEV, "tms-dev-rg", 2, 27.0))
+
+    def test_something_that_stops_on_some_days_is_not_always_on(self):
+        (h,) = self.devtest(self.data(plan=(5, 5, 5, 5, 0, 5)))
+        self.assertEqual(h["resources"], 1)  # only the pool
+
+    def test_dev_must_be_a_word_in_the_name(self):
+        group = "/subscriptions/aaaa-1/resourcegroups/rg-devices"
+        self.assertEqual(self.devtest(self.data(group_label="rg-devices", group=group)), [])
+
+    def test_a_dev_test_subscription_counts_too(self):
+        group = "/subscriptions/aaaa-1/resourcegroups/rg-app2"
+        data = self.data(group_label="rg-app2", group=group)
+        data["subscriptions"] = [{"id": "aaaa-1", "name": "acme-staging", "currency": "USD"}]
+        self.assertEqual(len(self.devtest(data)), 2)  # both groups sit in the staging subscription
+
+    def test_not_judged_from_period_totals(self):
+        self.assertEqual(self.devtest(self.data(resource_fallback=["acme-prod"])), [])
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_the_page_names_the_group_and_opens_it(self):
+        page = ViewerTest.run_page(self, self.data(), "service")
+        self.assertIn("tms-dev-rg", page["side"])
+        self.assertIn("always-on", page["side"])
+        page = ViewerTest.run_page(self, self.data(), "service", click="[data-hint]:0")
+        self.assertIn("all resource groups", page["crumbs"])
+        self.assertIn('<div class="sel-name">tms-dev-rg</div>', page["side"])
+
+    render = ViewerTest.render
+
+
 @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
 class ShowAllTest(unittest.TestCase):
     render = ViewerTest.render
