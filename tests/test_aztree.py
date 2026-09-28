@@ -1169,7 +1169,7 @@ class DemoTest(unittest.TestCase):
         cls.summary = aztree.summarize(cls.data)
 
     def test_same_shape_as_real_data(self):
-        self.assertEqual(set(self.data["views"]), set(aztree.VIEWS))
+        self.assertEqual(set(self.data["views"]), set(aztree.VIEWS) | {"tag"})  # the demo shows the tag view too
         for v, dims in aztree.VIEWS.items():
             self.assertEqual(self.data["views"][v]["dims"], dims)
         self.assertEqual(len(self.data["days"]), 60)
@@ -1214,6 +1214,53 @@ class DemoTest(unittest.TestCase):
         finally:
             aztree.get_token = real
         self.assertIn('"demo":true', page.read_text(encoding="utf-8"))
+
+
+class Batch4DemoTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.data = aztree.demo(30, today=TODAY)
+        cls.summary = aztree.summarize(cls.data)
+
+    def test_has_an_environment_tag_with_untagged_spend(self):
+        view = self.data["views"]["tag"]
+        self.assertEqual((view["tag"], view["dims"]), ("environment", ["TagValue", "ServiceName"]))
+        self.assertEqual({r["k"][0] for r in view["rows"]}, {"production", "staging", "dev", ""})
+
+    def test_has_a_forecast_for_this_month(self):
+        f = self.data["forecast"]
+        self.assertEqual(f["month"], "2026-09")
+        self.assertGreater(f["actual"], 0)
+        self.assertGreater(f["forecast"], 0)
+        self.assertEqual(f["total"], round(f["actual"] + f["forecast"], 2))
+
+    def test_has_idle_resources_that_cost_something(self):
+        checks = {h["check"] for h in self.summary["hints"] if h["kind"] == "idle"}
+        self.assertEqual(checks, {"unattached-disk", "old-snapshot", "unused-ip"})
+
+
+class Batch4CliTest(unittest.TestCase):
+    def run_main(self, *argv):
+        from contextlib import redirect_stdout
+        seen = {}
+
+        def fake_fetch(az, targets, days, metric, **kw):
+            seen.update(kw)
+            return make_data([("Storage", "LRS", [1] * 6)])
+
+        with mock.patch.object(aztree, "fetch", fake_fetch), \
+                mock.patch.object(aztree, "resolve_targets", lambda *a, **k: [aztree.subscription_target(PROD)]), \
+                mock.patch.dict(os.environ, {"AZTREE_HOME": str(scratch_dir(self))}), redirect_stdout(io.StringIO()):
+            aztree.main([*argv, "--no-open"])
+        return seen
+
+    def test_tag_and_no_graph_reach_fetch(self):
+        seen = self.run_main("--tag", "costcenter", "--no-graph")
+        self.assertEqual((seen["tag"], seen["graph"]), ("costcenter", False))
+
+    def test_by_default_the_tag_is_picked_and_the_graph_is_read(self):
+        seen = self.run_main()
+        self.assertEqual((seen["tag"], seen["graph"]), (None, True))
 
 
 class ReviewFixesTest(unittest.TestCase):

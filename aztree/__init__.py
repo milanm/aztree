@@ -601,6 +601,8 @@ DEMO = [
     ("Event Hubs", "Standard Throughput Unit", 3.6, 0, [(D, "eu west", "rg-etl", "microsoft.eventhub/namespaces/evh-ingest", 1)]),
     ("Container Registry", "Standard Registry Unit", 0.67, 0, [(P, "us east", "rg-app-prod", "microsoft.containerregistry/registries/acmecr", 1)]),
     ("Key Vault", "Operations", 0.3, 0, [(P, "us east", "rg-app-prod", "microsoft.keyvault/vaults/kv-app-prod", 1)]),
+    # its VM was deleted, the disk wasn't: Resource Graph finds it unattached (demo_graph)
+    ("Storage", "P10 LRS Disk", 0.65, 0, [(S, "us east", "rg-legacy", "microsoft.compute/disks/vm-old-ftp-osdisk", 1)]),
 ]
 
 
@@ -625,13 +627,43 @@ def demo_advisor():
     ]
 
 
+DEMO_TAG = "environment"
+DEMO_ENV = {P: "production", S: "staging", D: "production", X: "dev"}
+DEMO_UNTAGGED = {"", "rg-legacy", "rg-backup", "rg-ai-sandbox", "mc_rg-aks-prod_aks-prod_eastus"}  # the usual gaps
+
+
+def demo_env(sub, rg):
+    return "" if rg in DEMO_UNTAGGED else DEMO_ENV[sub]
+
+
+def demo_graph():
+    def found(check, sub, rg, path):
+        return {"check": check, "id": demo_rid(sub, rg, path), "name": path.rsplit("/", 1)[-1],
+                "resourceGroup": rg, "subscriptionId": sub}
+
+    return [found("unattached-disk", S, "rg-legacy", "microsoft.compute/disks/vm-old-ftp-osdisk"),
+            found("old-snapshot", P, "rg-backup", "microsoft.compute/snapshots/snap-vm-app-01-2025"),
+            found("unused-ip", X, "rg-sandbox", "microsoft.network/publicipaddresses/pip-old-test")]
+
+
+def demo_forecast(views, dates, today):
+    """This month so far from the demo's own days, and the last week's daily average for the days still to come."""
+    daily = [sum(r["d"][i] for r in views["service"]["rows"]) for i in range(len(dates))]
+    month = today.strftime("%Y-%m")
+    last = (today.replace(day=1) + dt.timedelta(32)).replace(day=1) - dt.timedelta(1)
+    actual = round(sum(v for d, v in zip(dates, daily) if d.startswith(month)), 2)
+    rest = round(sum(daily[-7:]) / 7 * (last - dt.date.fromisoformat(dates[-1])).days, 2)
+    return {"month": month, "actual": actual, "forecast": rest, "total": round(actual + rest, 2)}
+
+
 def demo(days, today=None):
+    today = today or dt.date.today()
     rnd = random.Random(7)
     end = last_full_day(today)
     n = 2 * days
     dates = [(end - dt.timedelta(n - 1 - i)).isoformat() for i in range(n)]
     weekend = [dt.date.fromisoformat(d).weekday() >= 5 for d in dates]
-    rows = {v: {} for v in VIEWS}
+    rows = {v: {} for v in [*VIEWS, "tag"]}
     names = {v: {} for v in VIEWS}
     names["subscription"] = dict(DEMO_SUBS)
     for service, meter, per_day, growth, spots in DEMO:
@@ -649,7 +681,8 @@ def demo(days, today=None):
             gkey = group_key({"scope": f"/subscriptions/{sub}"}, rg, rid)
             names["resource"][gkey] = f"{rg or '(no resource group)'} · {DEMO_SUBS[sub]}"
             for view, key in (("service", (service, meter)), ("subscription", (sub, service)),
-                              ("region", (region, service)), ("resource", (gkey, rid))):
+                              ("region", (region, service)), ("resource", (gkey, rid)),
+                              ("tag", (demo_env(sub, rg), service))):
                 acc = rows[view].setdefault(key, [0.0] * n)
                 for i, v in enumerate(daily):
                     acc[i] += v
@@ -657,20 +690,26 @@ def demo(days, today=None):
     rid = demo_rid(P, "rg-data-prod", "microsoft.documentdb/databaseaccounts/cosmos-catalog")
     gkey = group_key({"scope": f"/subscriptions/{P}"}, "rg-data-prod", rid)
     for view, key in (("service", ("Azure Cosmos DB", "Reserved 100 RU/s")), ("subscription", (P, "Azure Cosmos DB")),
-                      ("region", ("us east", "Azure Cosmos DB")), ("resource", (gkey, rid))):
+                      ("region", ("us east", "Azure Cosmos DB")), ("resource", (gkey, rid)),
+                      ("tag", (demo_env(P, "rg-data-prod"), "Azure Cosmos DB"))):
         rows[view].setdefault(key, [0.0] * n)[max(days, n - 6)] -= 150.0
     # a one-off backfill: Data Factory moved a year of data in one day, a spike for "worth a look"
     rid = demo_rid(D, "rg-etl", "microsoft.datafactory/factories/adf-etl")
     gkey = group_key({"scope": f"/subscriptions/{D}"}, "rg-etl", rid)
     for view, key in (("service", ("Azure Data Factory v2", "Cloud Data Movement")), ("subscription", (D, "Azure Data Factory v2")),
-                      ("region", ("eu west", "Azure Data Factory v2")), ("resource", (gkey, rid))):
+                      ("region", ("eu west", "Azure Data Factory v2")), ("resource", (gkey, rid)),
+                      ("tag", (demo_env(D, "rg-etl"), "Azure Data Factory v2"))):
         rows[view].setdefault(key, [0.0] * n)[max(days, n - 9)] += 180.0
+    views = {v: {"dims": VIEWS[v], "names": names[v], "rows": pack(rows[v])} for v in VIEWS}
+    views["tag"] = {"dims": ["TagValue", "ServiceName"], "names": {}, "tag": DEMO_TAG, "rows": pack(rows["tag"])}
     return {
         "days": dates, "split": days,
-        "views": {v: {"dims": VIEWS[v], "names": names[v], "rows": pack(rows[v])} for v in VIEWS},
+        "views": views,
         "currency": "USD",
         "subscriptions": [{"id": k, "name": v, "currency": "USD"} for k, v in DEMO_SUBS.items()],
-        "resource_fallback": [], "advisor": demo_advisor(), "advisor_error": None, "demo": True,
+        "resource_fallback": [], "advisor": demo_advisor(), "advisor_error": None,
+        "forecast": demo_forecast(views, dates, today), "forecast_note": None,
+        "graph": demo_graph(), "graph_error": None, "demo": True,
     }
 
 
@@ -1144,6 +1183,8 @@ def main(argv=None):
     ap.add_argument("--metric", default="ActualCost", choices=["ActualCost", "AmortizedCost"],
                     help="AmortizedCost spreads reservation and savings plan purchases over their term")
     ap.add_argument("--no-advisor", action="store_true", help="skip Azure Advisor's cost recommendations")
+    ap.add_argument("--tag", metavar="KEY", help="tag for the tag view (default: the tag on the most resources)")
+    ap.add_argument("--no-graph", action="store_true", help="skip the Resource Graph checks for idle resources")
     ap.add_argument("--from", dest="source", nargs="?", const=str(saved), metavar="JSON",
                     help="reopen saved data without calling Azure (default: the last run)")
     ap.add_argument("--out", default=str(home() / "aztree.html"), help="where to write the page (default ~/.aztree/aztree.html)")
@@ -1171,7 +1212,8 @@ def main(argv=None):
             targets = resolve_targets(args, az, cli_list=cli_subscriptions if cli else None)
             who_ = targets[0]["name"] if len(targets) == 1 else f"{len(targets)} subscriptions"
             print(f"aztree: reading {who_}, last {args.days} days (+{args.days} before, for comparison)")
-            data = fetch(az, targets, args.days, args.metric, advisor=not args.no_advisor)
+            data = fetch(az, targets, args.days, args.metric, advisor=not args.no_advisor, tag=args.tag,
+                         graph=not args.no_graph)
         except AzureError as e:
             die(explain(e))
         data.update(generated=dt.datetime.now().strftime("%Y-%m-%d %H:%M"), metric=args.metric)
