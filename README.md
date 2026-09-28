@@ -31,7 +31,7 @@ Click to select, double-click to zoom in, `⌫` to go back up, `/` to filter. Ad
 
 ## Requirements
 
-- Python 3.8+ and the [Azure CLI](https://aka.ms/azcli), logged in with `az login`. No CLI? Put a token for `https://management.azure.com/` in `AZURE_ACCESS_TOKEN` and name the subscriptions with `--subscription` or `--all`.
+- Python 3.8+ and the [Azure CLI](https://aka.ms/azcli), logged in with `az login`. No CLI? Put a token for `https://management.azure.com/` in `AZURE_ACCESS_TOKEN` and name the subscriptions with `--subscription` or `--all`. A bare token only sees its own tenant; through the CLI, aztree sees every tenant you're logged in to and gets a token for each.
 - The **Cost Management Reader** role (or Reader) on each subscription. Advisor tips need Reader; without it you still get the page.
 - Tested on a CSP subscription. Pay-as-you-go and Visual Studio subscriptions use the same API. EA and MCA billing scopes should work through `--scope`, but nobody has tried yet. At such a scope the subscription view shows the whole scope as one box, and Advisor is skipped.
 
@@ -55,7 +55,7 @@ This writes `out/aztree-export.json`, a compact summary that includes instructio
 |---|---|
 | `--demo` | Fake data, no Azure access needed |
 | `--subscription ID_OR_NAME` | Subscription to read; repeat for more. Default: the Azure CLI's current one |
-| `--all` | Every enabled subscription you can see |
+| `--all` | Every enabled subscription you can see, in every tenant you're logged in to |
 | `--scope SCOPE` | Any Cost Management scope, e.g. `/providers/Microsoft.Billing/billingAccounts/ID` (untested) |
 | `--days N` | Period length, default 30. It's always compared with the period before it. |
 | `--metric M` | `ActualCost` (default) or `AmortizedCost` |

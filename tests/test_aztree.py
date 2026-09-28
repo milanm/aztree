@@ -52,7 +52,7 @@ class TokenTest(unittest.TestCase):
 class PickSubscriptionsTest(unittest.TestCase):
     def test_default_is_current_cli_subscription(self):
         got = aztree.pick_subscriptions(SUBS, wanted=[], all_=False, current={"id": "bbbb-2", "name": "acme-dev"})
-        self.assertEqual(got, [{"id": "bbbb-2", "name": "acme-dev"}])
+        self.assertEqual(got, [{"id": "bbbb-2", "name": "acme-dev", "tenant": None}])
 
     def test_by_name_is_case_insensitive_and_by_id(self):
         got = aztree.pick_subscriptions(SUBS, wanted=["ACME-PROD", "bbbb-2"], all_=False, current=None)
@@ -197,13 +197,13 @@ class ListSubscriptionsTest(unittest.TestCase):
             return 200, {}, json.dumps({"value": items, "nextLink": nxt}).encode()
 
         send = FakeSend(
-            subs_page([{"subscriptionId": "aaaa-1", "displayName": "acme-prod", "state": "Enabled"}],
+            subs_page([{"subscriptionId": "aaaa-1", "displayName": "acme-prod", "state": "Enabled", "tenantId": "t-one"}],
                       "https://management.azure.com/subscriptions?page=2"),
             subs_page([{"subscriptionId": "bbbb-2", "displayName": "acme-dev", "state": "Disabled"}]),
         )
         got = aztree.list_subscriptions(client(send))
-        self.assertEqual(got, [{"id": "aaaa-1", "name": "acme-prod", "state": "Enabled"},
-                               {"id": "bbbb-2", "name": "acme-dev", "state": "Disabled"}])
+        self.assertEqual(got, [{"id": "aaaa-1", "name": "acme-prod", "state": "Enabled", "tenant": "t-one"},
+                               {"id": "bbbb-2", "name": "acme-dev", "state": "Disabled", "tenant": None}])
         self.assertTrue(send.calls[0]["url"].startswith("https://management.azure.com/subscriptions?api-version="))
         self.assertEqual(send.calls[0]["method"], "GET")
 
@@ -776,13 +776,13 @@ class TargetsTest(unittest.TestCase):
         targets = aztree.resolve_targets(self.args(scope="providers/Microsoft.Billing/billingAccounts/123/"), az=None)
         self.assertEqual(targets, [{"id": "/providers/Microsoft.Billing/billingAccounts/123",
                                     "name": "/providers/Microsoft.Billing/billingAccounts/123",
-                                    "scope": "/providers/Microsoft.Billing/billingAccounts/123"}])
+                                    "scope": "/providers/Microsoft.Billing/billingAccounts/123", "tenant": None}])
 
     def test_subscriptions_are_resolved_against_arm(self):
         send = FakeSend((200, {}, json.dumps({"value": [
             {"subscriptionId": "aaaa-1", "displayName": "acme-prod", "state": "Enabled"}]}).encode()))
         targets = aztree.resolve_targets(self.args(subscription=["acme-prod"]), az=client(send))
-        self.assertEqual(targets, [{"id": "aaaa-1", "name": "acme-prod", "scope": "/subscriptions/aaaa-1"}])
+        self.assertEqual(targets, [{"id": "aaaa-1", "name": "acme-prod", "scope": "/subscriptions/aaaa-1", "tenant": None}])
 
 
 class DemoTest(unittest.TestCase):
@@ -988,6 +988,58 @@ class SecondReviewTest(unittest.TestCase):
         data["views"]["region"]["rows"][0]["k"][0] = ""  # Azure leaves ResourceLocation empty for some charges
         page = ViewerTest.run_page(self, data, "region", click={"map": "dblclick", "key": ""})
         self.assertIn('<span class="cur">(no region)</span>', page["crumbs"])
+
+    def test_cli_lists_subscriptions_from_every_tenant(self):
+        listing = [{"id": "aaaa-1", "name": "acme-prod", "state": "Enabled", "tenantId": "t-one"},
+                   {"id": "bbbb-2", "name": "client-x", "state": "Enabled", "tenantId": "t-two"}]
+        calls = []
+
+        def run(cmd, **k):
+            calls.append(cmd)
+            return SimpleNamespace(returncode=0, stdout=json.dumps(listing), stderr="")
+
+        got = aztree.cli_subscriptions(run=run, az_path="az")
+        self.assertEqual([(s["id"], s["tenant"]) for s in got], [("aaaa-1", "t-one"), ("bbbb-2", "t-two")])
+        self.assertEqual(calls[0][1:3], ["account", "list"])
+
+    def test_token_for_a_tenant_asks_the_cli_for_that_tenant(self):
+        calls = []
+
+        def run(cmd, **k):
+            calls.append(cmd)
+            return SimpleNamespace(returncode=0, stdout="t\n", stderr="")
+
+        aztree.get_token({}, run=run, az_path="az", tenant="t-two")
+        self.assertEqual(calls[0][calls[0].index("--tenant") + 1], "t-two")
+
+    def test_picked_subscriptions_keep_their_tenant(self):
+        subs = [{"id": "bbbb-2", "name": "client-x", "state": "Enabled", "tenant": "t-two"}]
+        picked = aztree.pick_subscriptions(subs, wanted=["client-x"], all_=False, current=None)
+        self.assertEqual(aztree.subscription_target(picked[0])["tenant"], "t-two")
+
+    def test_all_reads_the_cli_list_when_given_one(self):
+        args = SimpleNamespace(scope=None, subscription=[], all=True)
+        cli = lambda: [{"id": "bbbb-2", "name": "client-x", "state": "Enabled", "tenant": "t-two"}]  # noqa: E731
+        self.assertEqual(aztree.resolve_targets(args, az=None, cli_list=cli)[0]["tenant"], "t-two")
+
+    def test_each_tenant_gets_its_own_token(self):
+        router, seen, asked = Router(ONE_SUB), [], []
+
+        def send(method, url, data, headers):
+            seen.append((url.split("/providers/")[0], headers["Authorization"]))
+            return router(method, url, data, headers)
+
+        def token(tenant):
+            asked.append(tenant)
+            return f"tok-{tenant}"
+
+        az = aztree.Azure(token, send=send, sleep=lambda s: None, log=lambda *a: None)
+        targets = [aztree.subscription_target({"id": "aaaa-1", "name": "acme-prod", "tenant": "t-one"}),
+                   aztree.subscription_target({"id": "bbbb-2", "name": "client-x", "tenant": "t-two"})]
+        aztree.fetch(az, targets, 3, "ActualCost", advisor=False, log=lambda *a: None, today=TODAY)
+        self.assertEqual(asked, ["t-one", "t-two"])  # once per tenant, then cached
+        self.assertEqual({auth for scope, auth in seen if scope.endswith("aaaa-1")}, {"Bearer tok-t-one"})
+        self.assertEqual({auth for scope, auth in seen if scope.endswith("bbbb-2")}, {"Bearer tok-t-two"})
 
     def test_a_selected_group_stays_under_its_boxes(self):
         # groups and their leaves are siblings; lifting a selected group would cover its leaves

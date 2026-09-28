@@ -64,20 +64,27 @@ def az_cli(args, run=subprocess.run, az_path=None):
     return r.stdout
 
 
-def get_token(env=os.environ, run=subprocess.run, az_path=None):
+def get_token(env=os.environ, run=subprocess.run, az_path=None, tenant=None):
+    """A token for ARM. Tokens are per tenant, so ask for the tenant a subscription lives in."""
     if env.get("AZURE_ACCESS_TOKEN"):
         return env["AZURE_ACCESS_TOKEN"]
-    out = az_cli(["account", "get-access-token", "--resource", ARM + "/", "--query", "accessToken", "-o", "tsv"],
-                 run=run, az_path=az_path)
-    return out.strip()
+    args = ["account", "get-access-token", "--resource", ARM + "/", "--query", "accessToken", "-o", "tsv"]
+    return az_cli(args + (["--tenant", tenant] if tenant else []), run=run, az_path=az_path).strip()
+
+
+def cli_subscriptions(run=subprocess.run, az_path=None):
+    """Every subscription the Azure CLI knows, across every tenant you're logged in to."""
+    subs = json.loads(az_cli(["account", "list", "-o", "json"], run=run, az_path=az_path))
+    return [{"id": s["id"], "name": s["name"], "state": s["state"], "tenant": s.get("tenantId")} for s in subs]
 
 
 def list_subscriptions(az):
-    """Every subscription the token can see, straight from ARM, so AZURE_ACCESS_TOKEN works without the CLI."""
+    """Every subscription a bare token can see, straight from ARM: only that token's tenant."""
     subs, url = [], "/subscriptions?api-version=2022-12-01"
     while url:
         page = az.call("GET", url)
-        subs += [{"id": s["subscriptionId"], "name": s["displayName"], "state": s["state"]} for s in page.get("value", [])]
+        subs += [{"id": s["subscriptionId"], "name": s["displayName"], "state": s["state"], "tenant": s.get("tenantId")}
+                 for s in page.get("value", [])]
         url = page.get("nextLink")
     return subs
 
@@ -86,17 +93,21 @@ def current_subscription(run=subprocess.run):
     """The subscription `az account show` points at, or None without the CLI."""
     if not shutil.which("az"):
         return None
-    return json.loads(az_cli(["account", "show", "--query", "{id:id, name:name}", "-o", "json"], run=run))
+    return json.loads(az_cli(["account", "show", "--query", "{id:id, name:name, tenant:tenantId}", "-o", "json"], run=run))
+
+
+def sub_ref(s):
+    return {"id": s["id"], "name": s["name"], "tenant": s.get("tenant")}
 
 
 def pick_subscriptions(available, wanted, all_, current):
     """Choose which subscriptions to read: --all, --subscription (id or name), or the CLI's current one."""
     if all_:
-        return [{"id": s["id"], "name": s["name"]} for s in available if s["state"] == "Enabled"]
+        return [sub_ref(s) for s in available if s["state"] == "Enabled"]
     if not wanted:
         if not current:
             die("no default subscription. Pass --subscription ID_OR_NAME or --all.")
-        return [{"id": current["id"], "name": current["name"]}]
+        return [sub_ref(current)]
     picked = []
     for w in wanted:
         hits = [s for s in available if w.lower() in (s["id"].lower(), s["name"].lower())]
@@ -108,7 +119,7 @@ def pick_subscriptions(available, wanted, all_, current):
             die(f"{len(hits)} subscriptions are named '{w}'. Pass the one you mean by id:\n    {ids}")
         hit = hits[0]
         if all(p["id"] != hit["id"] for p in picked):
-            picked.append({"id": hit["id"], "name": hit["name"]})
+            picked.append(sub_ref(hit))
     return picked
 
 
@@ -142,13 +153,22 @@ def retry_after(headers):
 
 class Azure:
     def __init__(self, token, send=http_send, sleep=time.sleep, verbose=False, log=print):
+        """`token` is a token, or a function tenant -> token for runs that span tenants."""
         self.token, self.send, self.sleep, self.verbose, self.log = token, send, sleep, verbose, log
+        self.tokens = {}
         self.requests = 0
 
-    def call(self, method, url, body=None):
+    def token_for(self, tenant):
+        if isinstance(self.token, str):
+            return self.token
+        if tenant not in self.tokens:
+            self.tokens[tenant] = self.token(tenant)
+        return self.tokens[tenant]
+
+    def call(self, method, url, body=None, tenant=None):
         url = url if url.startswith("https://") else ARM + url
         data = json.dumps(body).encode() if body is not None else None
-        headers = {"Authorization": "Bearer " + self.token, "Content-Type": "application/json"}
+        headers = {"Authorization": "Bearer " + self.token_for(tenant), "Content-Type": "application/json"}
         for attempt in range(1, MAX_TRIES + 1):
             try:
                 status, resp_headers, raw = self.send(method, url, data, headers)
@@ -195,7 +215,7 @@ def explain(e):
     return f"Azure error: {e}" + ("\n  -> " + "\n  -> ".join(hints) if hints else "")
 
 
-def query(az, scope, start, end, groupings, metric, aggs=("Cost", "CostUSD"), max_pages=None):
+def query(az, scope, start, end, groupings, metric, aggs=("Cost", "CostUSD"), max_pages=None, tenant=None):
     """One Cost Management query at daily granularity. `start` and `end` are ISO dates, both inclusive.
     Returns every row of every page as a dict keyed by column name."""
     body = {
@@ -214,7 +234,7 @@ def query(az, scope, start, end, groupings, metric, aggs=("Cost", "CostUSD"), ma
         pages += 1
         if max_pages and pages > max_pages:
             raise TooManyPages(f"more than {max_pages} pages")
-        props = az.call("POST", url, body).get("properties", {})
+        props = az.call("POST", url, body, tenant=tenant).get("properties", {})
         cols = [c["name"] for c in props.get("columns", [])]
         if cols and aggs[0] not in cols:
             raise AzureError(0, f"Cost Management answered without a {aggs[0]} column (columns: {', '.join(cols)})")
@@ -226,12 +246,12 @@ def query(az, scope, start, end, groupings, metric, aggs=("Cost", "CostUSD"), ma
 # ---------------------------------------------------------------- reading costs
 
 def subscription_target(sub):
-    return {"id": sub["id"], "name": sub["name"], "scope": f"/subscriptions/{sub['id']}"}
+    return {"id": sub["id"], "name": sub["name"], "scope": f"/subscriptions/{sub['id']}", "tenant": sub.get("tenant")}
 
 
 def scope_target(scope):
     scope = "/" + scope.strip("/")
-    return {"id": scope, "name": scope, "scope": scope}
+    return {"id": scope, "name": scope, "scope": scope, "tenant": None}
 
 
 def usage_day(v):
@@ -263,7 +283,8 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None):
     def run(target, groupings, **kw):
         while True:
             try:
-                return query(az, target["scope"], dates[0], dates[-1], groupings, metric, aggs[0], **kw)
+                return query(az, target["scope"], dates[0], dates[-1], groupings, metric, aggs[0],
+                             tenant=target.get("tenant"), **kw)
             except AzureError as e:
                 if e.status != 400 or len(aggs) == 1:
                     raise
@@ -496,7 +517,7 @@ def advisor_recs(az, target):
     url = f"{target['scope']}/providers/Microsoft.Advisor/recommendations?api-version=2023-01-01&$filter={flt}"
     best = {}
     while url:
-        page = az.call("GET", url)
+        page = az.call("GET", url, tenant=target.get("tenant"))
         for item in page.get("value", []):
             key, rec = advisor_rec(item.get("properties", {}), target)
             if key not in best or (rec["annual_savings"] or 0) > (best[key]["annual_savings"] or 0):
@@ -665,11 +686,13 @@ def render(data, out):
     out.write_text(html.replace("__AZTREE_DATA__", blob), encoding="utf-8")
 
 
-def resolve_targets(args, az):
+def resolve_targets(args, az, cli_list=None):
+    """`cli_list` lists subscriptions through the Azure CLI (every tenant); without it, ARM lists the token's tenant."""
     if args.scope:
         return [scope_target(args.scope)]
     current = None if (args.all or args.subscription) else current_subscription()
-    return [subscription_target(s) for s in pick_subscriptions(list_subscriptions(az), args.subscription, args.all, current)]
+    available = cli_list() if cli_list else list_subscriptions(az)
+    return [subscription_target(s) for s in pick_subscriptions(available, args.subscription, args.all, current)]
 
 
 def main(argv=None):
@@ -705,8 +728,9 @@ def main(argv=None):
         data.update(generated=dt.datetime.now().strftime("%Y-%m-%d %H:%M"), metric=args.metric)
     else:
         try:
-            az = Azure(get_token(), verbose=args.verbose)
-            targets = resolve_targets(args, az)
+            az = Azure(lambda tenant: get_token(tenant=tenant), verbose=args.verbose)
+            cli = shutil.which("az") and not os.environ.get("AZURE_ACCESS_TOKEN")
+            targets = resolve_targets(args, az, cli_list=cli_subscriptions if cli else None)
             who_ = targets[0]["name"] if len(targets) == 1 else f"{len(targets)} subscriptions"
             print(f"aztree: reading {who_}, last {args.days} days (+{args.days} before, for comparison)")
             data = fetch(az, targets, args.days, args.metric, advisor=not args.no_advisor)
