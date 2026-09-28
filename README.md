@@ -2,19 +2,21 @@
 
 **Where did my Azure money go?** aztree reads your Azure costs and draws them as a treemap: big box, big cost. It's a port of [awstree](https://github.com/petricbranko/awstree) by Branko Petric, which took the idea from [disktree](https://x.com/tobi/status/2103251521223921739) by [Tobi Lütke](https://x.com/tobi). Same idea again, pointed at an Azure subscription.
 
-![aztree showing a demo Azure bill as a treemap](docs/screenshot.png)
+![aztree showing a demo Azure bill as a treemap](https://raw.githubusercontent.com/milanm/aztree/main/docs/screenshot.png)
 
-It's one Python file with no dependencies to install, and it produces a single HTML page that works offline.
+It's one small Python package with no dependencies, and it produces a single HTML page that works offline.
 
 ## Quick start
 
 ```bash
-git clone https://github.com/milanm/aztree && cd aztree
-python3 aztree.py --demo                    # try it with fake data, no Azure needed
+pipx install aztree         # or: pip install aztree
+aztree --demo               # try it with fake data, no Azure needed
 az login
-python3 aztree.py                           # your current subscription
-python3 aztree.py --all                     # every subscription you can see
+aztree                      # your current subscription
+aztree --all                # every subscription you can see
 ```
+
+Before the first PyPI release, install from GitHub instead: `pipx install git+https://github.com/milanm/aztree`. From a clone, run `python -m aztree` without installing anything.
 
 The page opens in your browser. It shows the last 30 days, compared with the 30 days before. The last day is the day before yesterday, because Azure is still posting yesterday's usage.
 
@@ -32,24 +34,24 @@ Click to select, double-click to zoom in, `⌫` to go back up, `/` to filter. Ad
 
 ## Requirements
 
-- Python 3.8+ and the [Azure CLI](https://aka.ms/azcli), logged in with `az login`. Without the CLI, put a token for `https://management.azure.com/` in `AZURE_ACCESS_TOKEN` and name the subscriptions with `--subscription` or `--all`. A bare token only sees its own tenant; through the CLI, aztree sees every tenant you're logged in to and gets a token for each.
+- Python 3.9+ and the [Azure CLI](https://aka.ms/azcli), logged in with `az login`. Without the CLI, put a token for `https://management.azure.com/` in `AZURE_ACCESS_TOKEN` and name the subscriptions with `--subscription` or `--all`. A bare token only sees its own tenant; through the CLI, aztree sees every tenant you're logged in to and gets a token for each.
 - The **Cost Management Reader** role (or Reader) on each subscription. Advisor tips need Reader; without it you still get the page.
 - Tested on a CSP subscription. On CSP, Azure shows costs at retail prices without your partner's discounts, and reserved usage as $0 even with `--metric AmortizedCost`, so the totals won't match your partner's invoice. Pay-as-you-go and Visual Studio subscriptions use the same API.
 - EA and MCA billing scopes should work through `--scope`, but nobody has tried yet. At such a scope the subscription view shows the whole scope as one box, and Advisor is skipped.
 
-**Cost:** Cost Management queries are free. Azure throttles them per subscription and per tenant, so a run makes about 8–10 requests per subscription and may wait 30–60 seconds when Azure asks it to. aztree saves the data, so reopening the page is instant:
+**Cost:** Cost Management queries are free. Azure throttles them per subscription and per tenant, so a run makes about 8–10 requests per subscription and may wait 30–60 seconds when Azure asks it to. aztree saves the data in `~/.aztree/`, so reopening the page is instant:
 
 ```bash
-python3 aztree.py --from out/aztree-data.json
+aztree --from
 ```
 
 ## Ask an AI about your bill
 
 ```bash
-python3 aztree.py --from out/aztree-data.json --export
+aztree --from --export
 ```
 
-This writes `out/aztree-export.json`, a compact summary that includes instructions for the agent. It has totals, breakdowns by service, subscription, region and resource group, and every meter with its change vs the previous period. It also lists the top growers and drops, credits and refunds, the flagged money pits and the Advisor tips. Give it to an AI agent and ask *"where can I save money?"*. The **Export for AI** button in the page (or `e`) downloads the same file.
+This writes `~/.aztree/aztree-export.json`, a compact summary that includes instructions for the agent. It has totals, breakdowns by service, subscription, region and resource group, and every meter with its change vs the previous period. It also lists the top growers and drops, credits and refunds, the flagged money pits and the Advisor tips. Give it to an AI agent and ask *"where can I save money?"*. The **Export for AI** button in the page (or `e`) downloads the same file.
 
 ## Options
 
@@ -62,11 +64,12 @@ This writes `out/aztree-export.json`, a compact summary that includes instructio
 | `--days N` | Period length, default 30. It's always compared with the period before it. |
 | `--metric M` | `ActualCost` (default) or `AmortizedCost` |
 | `--no-advisor` | Skip Azure Advisor |
-| `--from FILE` | Reopen saved data without calling Azure |
-| `--export [FILE]` | Write the AI summary JSON instead of the page |
-| `--out FILE` | Where to write the page (default `out/aztree.html`) |
+| `--from [FILE]` | Reopen saved data without calling Azure (default: the last run) |
+| `--export [FILE]` | Write the AI summary JSON instead of the page (default `~/.aztree/aztree-export.json`) |
+| `--out FILE` | Where to write the page (default `~/.aztree/aztree.html`) |
 | `--no-open` | Don't open the browser |
 | `--verbose` | Print pages, rows and query units per request |
+| `--version` | Print the version |
 
 ## Good to know
 
@@ -75,6 +78,7 @@ This writes `out/aztree-export.json`, a compact summary that includes instructio
 - Subscriptions that bill in different currencies are drawn in USD.
 - If a subscription has so many resources that a daily breakdown takes more than ten pages of results, the resource view still lists every resource but with one total per period and no daily chart.
 - Marketplace charges keep their publisher's meter names and get no special handling.
+- Runs save to `~/.aztree/`; set `AZTREE_HOME` to move it. Older versions run from a clone saved to `out/`, and `aztree --from out/aztree-data.json` still opens those runs.
 
 ## Checking against the portal
 
@@ -82,12 +86,13 @@ In the Azure portal, open **Cost Management → Cost analysis**, choose the cost
 
 ## Privacy
 
-aztree only reads cost data and Advisor recommendations, and never changes anything in your subscriptions. Everything it writes goes to `out/`, which is git-ignored because it contains your subscription IDs and costs. The page loads nothing from the internet. Share the HTML or export file only with people who should see your bill.
+aztree only reads cost data and Advisor recommendations, and never changes anything in your subscriptions. Everything it writes goes to `~/.aztree/` (or `AZTREE_HOME`), outside any git repo, because it contains your subscription IDs and costs. The page loads nothing from the internet. Share the HTML or export file only with people who should see your bill.
 
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests
+python -m unittest discover -s tests
+python -m aztree --demo
 ```
 
 The tests need no Azure access. The viewer tests run the page's script in Node and are skipped without it.

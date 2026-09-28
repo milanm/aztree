@@ -7,3 +7,8 @@ aztree.html
 __pycache__/
 *.pyc
 .DS_Store
+
+# Build output
+dist/
+build/
+*.egg-info/
