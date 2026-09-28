@@ -262,6 +262,7 @@ function buildTree(viewKey, filter) {
       for (const c of n.children) { total(c); for (let i = 0; i < N; i++) n.daily[i] += c.daily[i]; }
       // credits and refunds can't be drawn as boxes, but they are in the totals: keep count of them
       n.credits = n.children.reduce((s, c) => s + c.credits, 0);
+      n.gone = n.children.filter(c => c.cur < 0.005 && c.prev >= 0.005); // spent before, nothing now: no box, still news
       n.children = n.children.filter(c => c.cur >= 0.005).sort((a, b) => b.cur - a.cur);
     }
     n.prev = 0; n.cur = 0;
@@ -433,6 +434,16 @@ function renderSide() {
         <div class="hs" title="${esc(h.why)}">${esc(h.why)}</div><div class="hb"><i style="width:${(h.n.cur / max) * 100}%"></i></div></div>`).join("") +
       `</section>`;
   }
+  const drops = biggestDrops();
+  if (drops.length) {
+    const max = Math.max(...drops.map(h => -h.d));
+    html += `<section><div class="h">Biggest drops <b style="color:var(--down)">${money(drops.reduce((s, h) => s + h.d, 0))}</b></div>` +
+      drops.map((h, i) => `<div class="hint" data-drop="${i}" style="--c:var(--down)">
+        <div class="hn" title="${esc(h.n.full)}">${esc(shortSvc(h.n.parent.key))} · ${esc(h.n.name)}</div><div class="hv">${money(h.n.cur)}</div>
+        <div class="hs">${h.n.cur < 0.005 ? "gone" : "down " + pct(-h.d / h.n.prev)} (${money(h.d)}) vs previous ${DAYS}d</div>
+        <div class="hb"><i style="width:${(-h.d / max) * 100}%"></i></div></div>`).join("") +
+      `</section>`;
+  }
   $("#side").innerHTML = html + advisorPanel();
 }
 
@@ -457,6 +468,17 @@ function advisorPanel() {
       <div class="hs" title="${esc(r.resource || "")}">${esc([r.resource_name, r.sku, Object.hasOwn(TERM, r.term) && TERM[r.term]].filter(Boolean).join(" · "))}</div>
       <div class="hb"><i style="width:${((r.annual_savings || 0) / max) * 100}%"></i></div></div>`).join("") +
     (recs.length > SHOWN_RECS ? `<div class="note">+${recs.length - SHOWN_RECS} more in Export for AI</div>` : "") + `</section>`;
+}
+
+// ---------- biggest drops: what fell since the previous period, including what went to zero (always the service view)
+let _drops;
+function biggestDrops() {
+  if (_drops) return _drops;
+  const t = buildTree("service", "");
+  const leaves = [...t.children, ...t.gone].flatMap(g => [...g.children, ...(g.gone || [])]);
+  return (_drops = leaves.map(n => ({ n, d: n.cur - n.prev }))
+    .filter(h => h.d <= -Math.max(1, t.cur * 0.005) && h.d / h.n.prev < -0.2)
+    .sort((a, b) => a.d - b.d).slice(0, 3));
 }
 
 // ---------- worth a look: known money pits + fastest growers (always from the service view)
@@ -529,10 +551,14 @@ $("#filter").addEventListener("input", e => {
   render();
 });
 $("#side").addEventListener("click", e => {
-  const h = e.target.closest("[data-hint]"), r = e.target.closest("[data-rec]");
+  const h = e.target.closest("[data-hint]"), dr = e.target.closest("[data-drop]"), r = e.target.closest("[data-rec]");
+  const same = leaf => n => n.kind === "leaf" && n.key === leaf.key && n.parent.key === leaf.parent.key;
   if (h) {
-    const leaf = worthALook()[+h.dataset.hint].n;
-    reveal("service", n => n.kind === "leaf" && n.key === leaf.key && n.parent.key === leaf.parent.key);
+    reveal("service", same(worthALook()[+h.dataset.hint].n));
+  } else if (dr) {
+    const leaf = biggestDrops()[+dr.dataset.drop].n;
+    reveal("service", same(leaf));
+    if (!state.sel) { state.sel = leaf; renderSide(); } // went to zero: no box to select, but its numbers still show
   } else if (r) {
     const rec = DATA.advisor[+r.dataset.rec], sub = (rec.resource.match(/^\/subscriptions\/([^/]+)$/) || [])[1];
     if (/\/resourcegroups\//.test(rec.resource)) reveal("resource", n => n.key === rec.resource);

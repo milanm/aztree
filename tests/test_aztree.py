@@ -1111,6 +1111,26 @@ class Batch1Test(unittest.TestCase):
         plain = ViewerTest.run_page(self, make_data([("Storage", "LRS", [5] * 6)]), "service")
         self.assertNotIn("credits", plain["sub"])
 
+    DROPPED = [("Storage", "Hot LRS Data Stored", [5] * 6), ("Storage", "Old disk", [10, 10, 10, 0, 0, 0]),
+               ("SQL Database", "vCore", [20, 20, 20, 5, 5, 5])]
+
+    def test_export_lists_the_biggest_drops(self):
+        drops = aztree.summarize(make_data(self.DROPPED))["top_drops"]
+        self.assertEqual([(d["meter"], d["change"]) for d in drops], [("vCore", -45.0), ("Old disk", -30.0)])
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_page_lists_the_biggest_drops_even_when_gone(self):
+        page = ViewerTest.run_page(self, make_data(self.DROPPED), "service")
+        self.assertIn("Biggest drops", page["side"])
+        self.assertIn("vCore", page["side"])
+        self.assertIn("Old disk", page["side"])  # fell to zero, so it has no box, but it's the drop you want to see
+        self.assertIn("down 75%", page["side"])
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_clicking_a_gone_drop_shows_its_numbers(self):
+        page = ViewerTest.run_page(self, make_data(self.DROPPED), "service", click="[data-drop]:1")
+        self.assertIn('<div class="sel-name">Old disk</div>', page["side"])
+
     render = ViewerTest.render
 
 

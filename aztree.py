@@ -643,6 +643,8 @@ def summarize(data):
     growers = [x for x in line_items
                if x["change"] >= max(1, grand * 0.005) and (x["change_pct"] is None or x["change_pct"] > 20)]
     growers = sorted(growers, key=lambda x: -x["change"])[:10]
+    drops = [x for x in line_items if x["change"] <= -max(1, grand * 0.005) and (x["change_pct"] or 0) < -20]
+    drops = sorted(drops, key=lambda x: x["change"])[:10]
     flags = []
     for x in line_items:
         why = pit(x["service"], x["meter"])
@@ -674,6 +676,7 @@ def summarize(data):
         "by_resource_group": breakdown("resource", "resource_group", "resource_id", "resources",
                                        label=lambda k, names: names.get(k, k), limit=TOP_RESOURCES),
         "top_growers": growers,
+        "top_drops": drops,
         "flags": flags,
         "advisor": data.get("advisor"),
         "advisor_error": data.get("advisor_error"),
