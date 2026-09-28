@@ -487,9 +487,12 @@ function spark(n) {
 const armId = n => n.kind === "root" || n.more || DATA.demo ? null
   : n.dim === "SubscriptionId" && /^[0-9a-f-]{36}$/i.test(n.key) ? `/subscriptions/${n.key}`
   : /^\/subscriptions\/[^/]+/i.test(n.key) ? n.key : null;
+// the portal opens another tenant's subscription only in that tenant's directory: #@<tenant>/resource/...
+const TENANTS = Object.fromEntries((DATA.subscriptions || []).filter(s => s.tenant).map(s => [String(s.id).toLowerCase(), s.tenant]));
 const portalLink = (n, html) => {
-  const id = armId(n);
-  return id && DATA.portal ? `<a href="${esc(DATA.portal)}/#resource${esc(encodeURI(id))}" target="_blank" rel="noopener noreferrer" title="open in the Azure portal">${html}</a>` : html;
+  const id = armId(n), tenant = id && TENANTS[(id.match(/^\/subscriptions\/([^/]+)/i) || [])[1]?.toLowerCase()];
+  const at = tenant ? `@${esc(encodeURIComponent(tenant))}/` : "";
+  return id && DATA.portal ? `<a href="${esc(DATA.portal)}/#${at}resource${esc(encodeURI(id))}" target="_blank" rel="noopener noreferrer" title="open in the Azure portal">${html}</a>` : html;
 };
 
 function renderSide() {

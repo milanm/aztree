@@ -487,7 +487,8 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None, tag=No
             forecasts.append(f)
         else:
             no_forecast.append(f"{t['name']} ({why})")
-        subs.append({"id": t["id"], "name": t["name"], "currency": next((c for c, _ in currencies.most_common() if c), None)})
+        subs.append({"id": t["id"], "name": t["name"], "currency": next((c for c, _ in currencies.most_common() if c), None),
+                     "tenant": t.get("tenant")})  # the page's portal links open this tenant's directory
 
     recs, advisor_error = None, None
     with_advisor = [t for t in targets if t["scope"].lower().startswith("/subscriptions/")]  # Advisor is per subscription
@@ -1165,7 +1166,7 @@ def summarize(data):
         "currency": "mixed" if data.get("mixed_currencies") else data.get("currency", "USD"),
         "currencies": data.get("mixed_currencies") or [data.get("currency", "USD")],
         "usd_rate": data.get("usd_rate"),
-        "subscriptions": data.get("subscriptions", []),
+        "subscriptions": [{k: v for k, v in s.items() if k != "tenant"} for s in data.get("subscriptions", [])],  # not needed there
         "demo_data": bool(data.get("demo")),
         "period": {
             "current": {"start": days[split], "end": days[-1], "days": n},

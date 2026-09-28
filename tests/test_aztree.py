@@ -2621,6 +2621,29 @@ class V051ReviewTest(unittest.TestCase):
         self.assertIn('<span class="cur">Log Analytics</span>', page["crumbs"])
 
 
+class TenantLinkTest(unittest.TestCase):
+    """Portal links (PR #1) open the subscription's own tenant, so --all across tenants lands in the right directory."""
+    render = ViewerTest.render
+    run_page = ViewerTest.run_page
+
+    def test_the_saved_data_keeps_each_subscriptions_tenant(self):
+        target = aztree.subscription_target({"id": "aaaa-1", "name": "acme-prod", "tenant": "t-one"})
+        data = aztree.fetch(client(Router(ONE_SUB)), [target], 3, "ActualCost", advisor=False, log=lambda *a: None, today=TODAY)
+        self.assertEqual(data["subscriptions"][0]["tenant"], "t-one")
+
+    def test_the_ai_export_leaves_the_tenant_out(self):
+        subs = [{"id": "aaaa-1", "name": "acme-prod", "currency": "USD", "tenant": "t-one"}]
+        s = aztree.summarize(make_data([("Storage", "LRS", [1] * 6)], subscriptions=subs))
+        self.assertEqual(s["subscriptions"], [{"id": "aaaa-1", "name": "acme-prod", "currency": "USD"}])
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_the_portal_link_opens_the_subscriptions_tenant(self):
+        data = Batch4PageTest.idle_data(self)
+        data["subscriptions"] = [{"id": "aaaa-1", "name": "acme-prod", "currency": "USD", "tenant": "t-one"}]
+        page = self.run_page(data, "service", click="[data-hint]:0")
+        self.assertIn(f'<a href="{aztree.PORTAL}/#@t-one/resource{RG}/providers/microsoft.compute/disks/d1"', page["side"])
+
+
 class ExplainTest(unittest.TestCase):
     def test_bad_response_is_not_blamed_on_the_network(self):
         send = FakeSend(page(["UsageDate", "ServiceName", "Meter"], [[20260925, "Storage", "LRS"]]))
