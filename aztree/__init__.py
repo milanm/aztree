@@ -292,6 +292,32 @@ def choose_tag(az, targets, wanted, log=print):
     return spelling[min(counts, key=lambda k: (-counts[k], k))]  # most resources, then by name
 
 
+def month_forecast(az, target, metric, today, column="Cost"):
+    """Azure's own forecast for this calendar month: what's billed so far and what's still to come, each summed,
+    and the currencies it answered in. None when Azure has no forecast (new subscriptions, some offers)."""
+    first = today.replace(day=1)
+    last = (first + dt.timedelta(32)).replace(day=1) - dt.timedelta(1)
+    body = {
+        "type": metric, "timeframe": "Custom",
+        "timePeriod": {"from": f"{first}T00:00:00Z", "to": f"{last}T23:59:59Z"},
+        "dataset": {"granularity": "Daily", "aggregation": {"totalCost": {"name": column, "function": "Sum"}}},
+        "includeActualCost": True, "includeFreshPartialCost": False,
+    }
+    url = f"{target['scope']}/providers/Microsoft.CostManagement/forecast?api-version={API_VERSION}"
+    sums, currencies, rows = {"Actual": 0.0, "Forecast": 0.0}, set(), 0
+    while url:
+        props = az.call("POST", url, body, tenant=target.get("tenant")).get("properties", {})
+        cols = [c["name"] for c in props.get("columns", [])]
+        for values in props.get("rows", []):
+            r = dict(zip(cols, values))
+            if r.get("CostStatus") in sums:
+                sums[r["CostStatus"]] += r.get(column) or 0.0
+                currencies.add(r.get("Currency"))
+                rows += 1
+        url = props.get("nextLink")
+    return {"actual": sums["Actual"], "forecast": sums["Forecast"], "currencies": currencies} if rows else None
+
+
 # ---------------------------------------------------------------- reading costs
 
 def subscription_target(sub):
@@ -332,6 +358,7 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None, tag=No
     names = {v: {} for v in VIEWS}
     columns = {}  # target id -> cost columns that target accepts, best first; every subscription starts at the top
     subs, fallback = [], []
+    forecasts, no_forecast = [], []
     twins = Counter(t["name"] for t in targets)  # "Pay-As-You-Go" twice needs the id to tell them apart
     targets = [{**t, "name": f"{t['name']} ({t['id'][:8]})"} if twins[t["name"]] > 1 else t for t in targets]
     tag = choose_tag(az, targets, tag, log)
@@ -393,6 +420,16 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None, tag=No
             except AzureError as e:
                 log(f"  {t['name']}: skipped the tag view ({e})")
                 tag = None  # without this target's part it wouldn't add up to the bill
+        log(f"  {t['name']}: forecast ...")
+        try:
+            f = month_forecast(az, t, metric, today or dt.date.today(), columns[t["id"]][0][0])
+            why = "Azure has none"
+        except AzureError as e:
+            f, why = None, f"HTTP {e.status}"
+        if f:
+            forecasts.append(f)
+        else:
+            no_forecast.append(f"{t['name']} ({why})")
         subs.append({"id": t["id"], "name": t["name"], "currency": next((c for c, _ in currencies.most_common() if c), None)})
 
     recs, advisor_error = None, None
@@ -414,6 +451,19 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None, tag=No
     usd = len(found) > 1 and all(cost_usd is not None for entries in raw.values() for *_, cost_usd in entries)
     if len(found) > 1 and not usd:
         log("  warning: these subscriptions bill in different currencies and Azure won't convert them; totals mix currencies")
+    currency = "USD" if usd or not found else min(found)
+    forecast, forecast_note = None, None
+    billed_in = {c for f in forecasts for c in f["currencies"] if c}
+    if no_forecast:
+        forecast_note = "no forecast for " + ", ".join(no_forecast)
+    elif billed_in - {currency}:
+        forecast_note = f"the forecast came in a different currency ({', '.join(sorted(billed_in))}) than the bill ({currency})"
+    elif forecasts:
+        actual, rest = (round(sum(f[k] for f in forecasts), 2) for k in ("actual", "forecast"))
+        forecast = {"month": (today or dt.date.today()).strftime("%Y-%m"), "actual": actual, "forecast": rest,
+                    "total": round(actual + rest, 2)}
+    if forecast_note:
+        log(f"  skipped this month's forecast: {forecast_note}")
     log(f"  done: {az.requests} requests (Cost Management queries are free)")
     views = {v: {"dims": dims, "names": names[v], "rows": fold(raw[v], len(dates), usd)} for v, dims in VIEWS.items()}
     if tag:
@@ -422,9 +472,10 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None, tag=No
     return {
         "days": dates, "split": days,
         "views": views,
-        "currency": "USD" if usd or not found else min(found),
+        "currency": currency,
         "subscriptions": subs, "resource_fallback": fallback,
-        "advisor": recs, "advisor_error": advisor_error, "demo": False,
+        "advisor": recs, "advisor_error": advisor_error,
+        "forecast": forecast, "forecast_note": forecast_note, "demo": False,
     }
 
 

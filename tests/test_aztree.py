@@ -513,6 +513,63 @@ class TagViewTest(unittest.TestCase):
         self.assertTrue(any("tag view" in line for line in lines), lines)
 
 
+class ForecastTest(unittest.TestCase):
+    SEP = [(20260901, "Actual", 100.0, "USD"), (20260927, "Actual", 50.0, "USD"),
+           (20260928, "Forecast", 40.0, "USD"), (20260930, "Forecast", 45.0, "USD")]
+    TWO = {("ServiceName", "Meter"): {"/subscriptions/aaaa-1": [(20260925, "Storage", "LRS", 1.0, "USD", None)],
+                                      "/subscriptions/bbbb-2": [(20260925, "Storage", "LRS", 1.0, "USD", None)]}}
+
+    def test_asks_for_this_calendar_month(self):
+        _, router = fetch(ONE_SUB, forecasts={"/subscriptions/aaaa-1": self.SEP})
+        ((_, scope, body),) = [c for c in router.other if c[0] == "forecast"]
+        self.assertEqual(scope, "/subscriptions/aaaa-1")
+        self.assertEqual(body["timePeriod"], {"from": "2026-09-01T00:00:00Z", "to": "2026-09-30T23:59:59Z"})
+        self.assertEqual((body["type"], body["includeActualCost"], body["includeFreshPartialCost"]), ("ActualCost", True, False))
+        self.assertEqual(body["dataset"]["aggregation"], {"totalCost": {"name": "Cost", "function": "Sum"}})
+
+    def test_december_ends_on_the_31st(self):
+        router = Router({}, forecasts={"/subscriptions/aaaa-1": self.SEP})
+        aztree.month_forecast(client(router), aztree.subscription_target(PROD), "ActualCost", aztree.dt.date(2026, 12, 5))
+        self.assertEqual(router.other[0][2]["timePeriod"]["to"], "2026-12-31T23:59:59Z")
+
+    def test_sums_what_is_billed_and_what_is_to_come(self):
+        data, _ = fetch(ONE_SUB, forecasts={"/subscriptions/aaaa-1": self.SEP})
+        self.assertEqual(data["forecast"], {"month": "2026-09", "actual": 150.0, "forecast": 85.0, "total": 235.0})
+        self.assertIsNone(data["forecast_note"])
+
+    def test_adds_up_across_subscriptions(self):
+        data, _ = fetch(self.TWO, targets=(PROD, DEV),
+                        forecasts={"/subscriptions/aaaa-1": self.SEP, "/subscriptions/bbbb-2": self.SEP})
+        self.assertEqual(data["forecast"]["total"], 470.0)
+
+    def test_a_subscription_without_a_forecast_means_none(self):
+        data, _ = fetch(self.TWO, targets=(PROD, DEV),
+                        forecasts={"/subscriptions/aaaa-1": self.SEP, "/subscriptions/bbbb-2": 403})
+        self.assertIsNone(data["forecast"])
+        self.assertIn("acme-dev (HTTP 403)", data["forecast_note"])
+
+    def test_an_empty_answer_means_none(self):
+        data, _ = fetch(ONE_SUB)  # the fake answers no rows unless told otherwise
+        self.assertIsNone(data["forecast"])
+        self.assertIn("acme-prod", data["forecast_note"])
+
+    def test_a_forecast_in_another_currency_is_left_out(self):
+        eur = [(d, s, c, "EUR") for d, s, c, _ in self.SEP]
+        data, _ = fetch(ONE_SUB, forecasts={"/subscriptions/aaaa-1": eur})  # the bill is in USD
+        self.assertIsNone(data["forecast"])
+        self.assertIn("currency", data["forecast_note"])
+
+    def test_rows_without_a_currency_count_as_the_bill_currency(self):
+        bare = [(d, s, c, None) for d, s, c, _ in self.SEP]
+        data, _ = fetch(ONE_SUB, forecasts={"/subscriptions/aaaa-1": bare})
+        self.assertEqual(data["forecast"]["total"], 235.0)
+
+    def test_the_column_the_queries_settled_on_is_used(self):
+        _, router = fetch(ONE_SUB, reject={"Cost", "CostUSD"}, forecasts={"/subscriptions/aaaa-1": self.SEP})
+        body = next(c[2] for c in router.other if c[0] == "forecast")
+        self.assertEqual(body["dataset"]["aggregation"]["totalCost"]["name"], "PreTaxCost")
+
+
 # (service, meter, words expected in the reason, or None for "no flag"). Meter names are from real bills.
 PIT_CASES = [
     ("Log Analytics", "Analytics Logs Data Ingestion", "Log Analytics ingestion"),
