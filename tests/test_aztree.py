@@ -570,6 +570,63 @@ class ForecastTest(unittest.TestCase):
         self.assertEqual(body["dataset"]["aggregation"]["totalCost"]["name"], "PreTaxCost")
 
 
+IDLE_DISK = {"check": "unattached-disk", "id": RID.rsplit("/providers/", 1)[0] + "/providers/microsoft.compute/disks/d1",
+             "name": "d1", "resourceGroup": "rg-app", "subscriptionId": "aaaa-1"}
+
+
+class GraphTest(unittest.TestCase):
+    def graph_calls(self, router):
+        return [c for c in router.other if c[0] == "graph"]
+
+    def test_one_query_for_the_subscriptions_of_a_tenant(self):
+        tables = {("ServiceName", "Meter"): {"/subscriptions/aaaa-1": [], "/subscriptions/bbbb-2": []}}
+        data, router = fetch(tables, targets=(PROD, DEV), findings=[[IDLE_DISK]])
+        ((_, body, _),) = self.graph_calls(router)
+        self.assertEqual(body["subscriptions"], ["aaaa-1", "bbbb-2"])
+        self.assertIn("unattached-disk", body["query"])
+        self.assertEqual((data["graph"], data["graph_error"]), ([IDLE_DISK], None))
+
+    def test_follows_skip_tokens(self):
+        other = {**IDLE_DISK, "id": IDLE_DISK["id"] + "2", "name": "d2"}
+        data, router = fetch(ONE_SUB, findings=[[IDLE_DISK], [other]])
+        self.assertEqual([f["name"] for f in data["graph"]], ["d1", "d2"])
+        self.assertEqual(self.graph_calls(router)[1][1]["options"]["$skipToken"], "1")
+
+    def test_stops_at_the_row_cap(self):
+        rows = [{**IDLE_DISK, "name": f"d{i}"} for i in range(3)]
+        with mock.patch.object(aztree, "MAX_GRAPH_ROWS", 2):
+            data, router = fetch(ONE_SUB, findings=[rows[:2], rows[2:]])
+        self.assertEqual((len(data["graph"]), len(self.graph_calls(router))), (2, 1))
+
+    def test_each_tenant_is_asked_with_its_own_token(self):
+        router = Router({}, findings=[[]])
+        az = aztree.Azure(lambda tenant: f"tok-{tenant}", send=router, sleep=lambda s: None, log=lambda *a: None)
+        targets = [aztree.subscription_target({"id": "aaaa-1", "name": "a", "tenant": "t-one"}),
+                   aztree.subscription_target({"id": "bbbb-2", "name": "b", "tenant": "t-two"})]
+        aztree.graph_findings(az, targets)
+        self.assertEqual([(c[1]["subscriptions"], c[2]) for c in self.graph_calls(router)],
+                         [(["aaaa-1"], "Bearer tok-t-one"), (["bbbb-2"], "Bearer tok-t-two")])
+
+    def test_without_access_the_run_goes_on_and_keeps_only_the_status(self):
+        lines = []
+        data, _ = fetch(ONE_SUB, findings=403, log=lines.append)
+        self.assertEqual((data["graph"], data["graph_error"]), ([], "HTTP 403"))
+        self.assertTrue(any("--no-graph" in line for line in lines), lines)
+        self.assertIn(("Storage", "Hot LRS Data Stored"), rows_of(data, "service"))
+
+    def test_no_graph_makes_no_call(self):
+        data, router = fetch(ONE_SUB, findings=[[IDLE_DISK]], graph=False)
+        self.assertIsNone(data["graph"])
+        self.assertEqual(self.graph_calls(router), [])
+
+    def test_other_scopes_are_not_asked(self):
+        router = Router({})
+        data = aztree.fetch(client(router), [aztree.scope_target("/providers/Microsoft.Billing/billingAccounts/1")], 3,
+                            "ActualCost", advisor=False, log=lambda *a: None, today=TODAY)
+        self.assertIsNone(data["graph"])
+        self.assertEqual(self.graph_calls(router), [])
+
+
 # (service, meter, words expected in the reason, or None for "no flag"). Meter names are from real bills.
 PIT_CASES = [
     ("Log Analytics", "Analytics Logs Data Ingestion", "Log Analytics ingestion"),

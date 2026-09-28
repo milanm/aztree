@@ -318,6 +318,42 @@ def month_forecast(az, target, metric, today, column="Cost"):
     return {"actual": sums["Actual"], "forecast": sums["Forecast"], "currencies": currencies} if rows else None
 
 
+GRAPH_API = "2022-10-01"
+MAX_GRAPH_ROWS = 5000
+# Resources that bill while doing nothing. One pass with case(): Resource Graph caps how many unions a query may have.
+IDLE_QUERY = """resources
+| extend check = case(
+    type =~ 'microsoft.compute/virtualmachines' and tostring(properties.extended.instanceView.powerState.code) =~ 'PowerState/stopped', 'stopped-vm',
+    type =~ 'microsoft.compute/disks' and tostring(properties.diskState) =~ 'Unattached', 'unattached-disk',
+    type =~ 'microsoft.network/publicipaddresses' and isempty(tostring(properties.ipConfiguration.id)) and isempty(tostring(properties.natGateway.id)), 'unused-ip',
+    type =~ 'microsoft.compute/snapshots' and todatetime(properties.timeCreated) < ago(90d), 'old-snapshot',
+    type =~ 'microsoft.web/serverfarms' and toint(properties.numberOfSites) == 0, 'empty-plan',
+    type =~ 'microsoft.network/natgateways' and coalesce(array_length(properties.subnets), 0) == 0, 'lonely-nat',
+    '')
+| where check != ''
+| project check, id = tolower(id), name, resourceGroup, subscriptionId"""
+
+
+def graph_findings(az, targets):
+    """What IDLE_QUERY finds in Azure Resource Graph: one query per tenant (tokens are per tenant) for all of
+    that tenant's subscriptions, at most MAX_GRAPH_ROWS rows in all."""
+    tenants = {}
+    for t in targets:
+        tenants.setdefault(t.get("tenant"), []).append(t["id"])
+    found = []
+    for tenant, subs in tenants.items():
+        options = {"resultFormat": "objectArray", "$top": 1000}
+        while len(found) < MAX_GRAPH_ROWS:
+            page = az.call("POST", f"/providers/Microsoft.ResourceGraph/resources?api-version={GRAPH_API}",
+                           {"subscriptions": subs, "query": IDLE_QUERY, "options": options}, tenant=tenant)
+            found += [{k: row.get(k) for k in ("check", "id", "name", "resourceGroup", "subscriptionId")}
+                      for row in page.get("data", [])]
+            if not page.get("$skipToken"):
+                break
+            options = {**options, "$skipToken": page["$skipToken"]}
+    return found[:MAX_GRAPH_ROWS]
+
+
 # ---------------------------------------------------------------- reading costs
 
 def subscription_target(sub):
@@ -349,7 +385,7 @@ def last_full_day(today=None):
     return (today or dt.date.today()) - dt.timedelta(2)
 
 
-def fetch(az, targets, days, metric, advisor=True, log=print, today=None, tag=None):
+def fetch(az, targets, days, metric, advisor=True, log=print, today=None, tag=None, graph=True):
     end = last_full_day(today)
     start = end - dt.timedelta(2 * days - 1)  # current window + previous window, for the "vs prev" deltas
     dates = [(start + dt.timedelta(i)).isoformat() for i in range(2 * days)]
@@ -446,6 +482,16 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None, tag=No
                 log(f"  {t['name']}: skipped Advisor ({e}). Reader on the subscription fixes access errors; --no-advisor hides this.")
         recs.sort(key=lambda r: -(r["annual_savings"] or -1))
 
+    findings, graph_error = None, None
+    if graph and with_advisor:  # Resource Graph, like Advisor, reads subscriptions
+        log("  Resource Graph ...")
+        try:
+            findings = graph_findings(az, with_advisor)
+        except Exception as e:  # needs Reader, like Advisor; the cost data alone is still worth a page
+            findings, graph_error = [], f"HTTP {e.status}" if isinstance(e, AzureError) else type(e).__name__
+            log(f"  skipped the Resource Graph checks ({e}). Reader on the subscription fixes access errors; "
+                "--no-graph hides this.")
+
     found = {s["currency"] for s in subs if s["currency"]}
     # USD only if every row has a USD figure: a subscription may have answered in its billing currency alone
     usd = len(found) > 1 and all(cost_usd is not None for entries in raw.values() for *_, cost_usd in entries)
@@ -475,7 +521,8 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None, tag=No
         "currency": currency,
         "subscriptions": subs, "resource_fallback": fallback,
         "advisor": recs, "advisor_error": advisor_error,
-        "forecast": forecast, "forecast_note": forecast_note, "demo": False,
+        "forecast": forecast, "forecast_note": forecast_note,
+        "graph": findings, "graph_error": graph_error, "demo": False,
     }
 
 
