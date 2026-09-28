@@ -1794,7 +1794,7 @@ class SpikeTest(unittest.TestCase):
     def test_a_one_day_charge_is_a_spike(self):
         (spike,) = self.spikes(("Azure Data Factory v2", "Cloud Data Movement", series(at={45: 60.0})))
         data = make_data([self.STEADY])
-        self.assertEqual((spike["meter"], spike["date"], spike["day"], spike["usual"], spike["amount"]),
+        self.assertEqual((spike["meter"], spike["date"], spike["day_cost"], spike["usual"], spike["amount"]),
                          ("Cloud Data Movement", data["days"][45], 60.0, 5.0, 55.0))
 
     def test_a_charge_on_a_meter_that_is_usually_zero_is_a_spike(self):
@@ -2437,6 +2437,80 @@ class DeferredMinorsTest(unittest.TestCase):
         page = self.run_page(make_data(self.DROPPED), "service", click="[data-drop]:1")  # Old disk: Storage is still there
         self.assertIn('<span class="cur">Storage</span>', page["crumbs"])
         self.assertEqual(page["history"][-1][1]["zoom"], "Storage")
+
+
+class CleanupTest(unittest.TestCase):
+    """Older review notes, checked against the code and reproduced before each fix."""
+    render = ViewerTest.render
+    run_page = ViewerTest.run_page
+
+    def test_the_export_says_which_subscriptions_have_period_totals(self):
+        s = aztree.summarize(make_data([("Storage", "LRS", [5] * 6)], resource_fallback=["acme-prod"]))
+        self.assertEqual(s["resource_fallback"], ["acme-prod"])
+        self.assertIn("resource_fallback", aztree.AI_INSTRUCTIONS)
+
+    def test_reservations_for_two_regions_stay_apart(self):
+        items = [advisor_item("Buy reserved instance", "/subscriptions/aaaa-1", "aaaa-1", "D4s v5", "P1Y", savings)
+                 for savings in (100, 200)]
+        items[0]["properties"]["extendedProperties"]["region"] = "eastus"
+        items[1]["properties"]["extendedProperties"]["region"] = "westeurope"
+        send = FakeSend((200, {}, json.dumps({"value": items}).encode()))
+        self.assertEqual(len(aztree.advisor_recs(client(send), aztree.subscription_target(PROD))), 2)
+
+    def test_cli_output_is_read_as_utf8(self):
+        # the Azure CLI writes UTF-8; a cp1252 Windows locale would turn "Milanović" into "MilanoviÄ‡"
+        seen = {}
+
+        def run(cmd, **kw):
+            seen.update(kw)
+            return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+        aztree.az_cli(["account", "show"], run=run, az_path="az")
+        self.assertEqual(seen.get("encoding"), "utf-8")
+
+    def test_the_demo_has_no_retired_gpu_series(self):
+        meters = {r["k"][1] for r in aztree.demo(30, today=TODAY)["views"]["service"]["rows"]}
+        self.assertNotIn("NC6s v3", meters)  # NCv3 retired on 30 Sep 2025
+
+    def test_server_errors_are_not_called_throttling(self):
+        lines = []
+        send = FakeSend(error(503, "ServiceUnavailable", "try later"), page(QueryTest.COLS, []))
+        aztree.query(client(send, log=lines.append), "/subscriptions/s1", "2026-09-22", "2026-09-27", ["ServiceName", "Meter"], "ActualCost")
+        self.assertTrue(any("503" in line for line in lines), lines)
+        self.assertFalse(any("throttl" in line for line in lines), lines)
+
+    def test_constrained_and_isolated_sizes_match_the_rules(self):
+        self.assertIn("D, Ds, Dv2, Dsv2", aztree.pit("Virtual Machines", "DS13-4 v2"))
+        for meter in ("E64i v3", "E64is v3", "E16-4s v3", "D8-2s v3"):
+            with self.subTest(meter=meter):
+                self.assertIn("Dv3 and Ev3", aztree.pit("Virtual Machines", meter) or "")
+        self.assertIsNone(aztree.pit("Virtual Machines", "E64s v5"))
+
+    def test_a_spike_names_its_days_cost_plainly(self):
+        (h,) = [h for h in aztree.summarize(aztree.demo(30, today=TODAY))["hints"] if h["kind"] == "spike"]
+        self.assertIn("day_cost", h)
+        self.assertNotIn("day", h)  # read like a day index
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_a_refund_bigger_than_the_usage_keeps_the_positive_meters_on_the_map(self):
+        data = make_data([("Azure Cosmos DB", "100 RU/s", [10] * 6), ("Azure Cosmos DB", "Reservation refund", [0, 0, 0, -50, 0, 0]),
+                          ("Storage", "LRS", [5] * 6)])
+        names = [d["name"] for d in self.run_page(data, "service")["drawn"]]
+        self.assertIn("100 RU/s", names)  # Cosmos DB nets to -$20, but it still ran $30 of RU/s
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_only_fallback_subscriptions_lose_the_daily_chart(self):
+        other = "/subscriptions/bbbb-2/resourcegroups/rg-other"
+        data = make_data([("Storage", "LRS", [5] * 6)],
+                         resource_rows=[(RG, RG + "/providers/x/y/a", [3, 0, 0, 4, 0, 0]), (other, other + "/providers/x/y/b", [1] * 6)],
+                         resource_fallback=["acme-prod"],
+                         subscriptions=[{"id": "aaaa-1", "name": "acme-prod", "currency": "USD"},
+                                        {"id": "bbbb-2", "name": "acme-dev", "currency": "USD"}])
+        data["views"]["resource"]["names"][other] = "rg-other"
+        page = self.run_page(data, "resource", click={"map": "click", "name": "rg-other"})
+        self.assertIn("<svg", page["side"])
+        page = self.run_page(data, "resource", click={"map": "click", "name": "rg-app"})
+        self.assertIn("period totals", page["side"])
 
 
 class ExplainTest(unittest.TestCase):

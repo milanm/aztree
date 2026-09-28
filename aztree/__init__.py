@@ -70,7 +70,7 @@ def az_cli(args, run=subprocess.run, az_path=None):
     path = az_path or shutil.which("az")
     if not path:
         die("need the Azure CLI (https://aka.ms/azcli), or a token in AZURE_ACCESS_TOKEN.")
-    r = run([path, *args], capture_output=True, text=True)
+    r = run([path, *args], capture_output=True, text=True, encoding="utf-8", errors="replace")  # az writes UTF-8
     if r.returncode:
         err = r.stderr.strip()
         hint = "\n  -> Log in first: `az login`." if "login" in err.lower() or "expired" in err.lower() else ""
@@ -200,7 +200,8 @@ class Azure:
                     self.log(f"    ({qpu} QPU consumed)")
             if (status == 429 or status >= 500) and attempt < MAX_TRIES:
                 wait = retry_after(resp_headers)
-                self.log(f"    Azure is throttling us (HTTP {status}); waiting {wait}s ...")
+                why = "Azure is throttling us" if status == 429 else "Azure had a server error"
+                self.log(f"    {why} (HTTP {status}); waiting {wait}s ...")
                 self.sleep(wait)
                 continue
             if status >= 400:
@@ -569,7 +570,7 @@ DEMO = [
     ("Virtual Machines", "D8s v5", 44, 0.1, [(P, "us east", "mc_rg-aks-prod_aks-prod_eastus",
                                              "microsoft.compute/virtualmachinescalesets/aks-nodepool1-vmss", 1)]),
     ("Virtual Machines", "E8s v5", 38, -0.7, [(D, "eu west", "rg-etl", f"{VM}/vm-etl-worker", 1)]),  # scaled down: a drop
-    ("Virtual Machines", "NC6s v3", 22, 0.3, [(D, "us east", "rg-ml", f"{VM}/vm-gpu-train", 1)]),
+    ("Virtual Machines", "NC8as T4 v3", 22, 0.3, [(D, "us east", "rg-ml", f"{VM}/vm-gpu-train", 1)]),  # NCv3 retired in 2025
     ("Virtual Machines", "D2 v2", 9, 0, [(S, "us east", "rg-legacy", f"{VM}/vm-legacy-ftp", 1)]),
     ("Azure Kubernetes Service", "Standard Uptime SLA", 2.4, 0, [(P, "us east", "rg-aks-prod",
                                                                   "microsoft.containerservice/managedclusters/aks-prod", 1)]),
@@ -729,9 +730,9 @@ def demo(days, today=None):
 # Known money pits: (service pattern, meter pattern, why, monthly floor). First match wins; a rule with a floor only
 # fires once the meter runs at least that much a month. `{profiles}` in a reason is filled in from the monthly amount.
 VM_END = r"(?:$|/| Low Priority| Spot| Promo)"
-RETIRING_MAY_2028 = r"^(?:DS?\d+(?: v2)?|L\d+s)" + VM_END  # D, Ds, Dv2, Dsv2, Ls
+RETIRING_MAY_2028 = r"^(?:DS?\d+(?:-\d+)?(?: v2)?|L\d+s)" + VM_END  # D, Ds, Dv2, Dsv2 (and constrained DS13-4 v2), Ls
 RETIRING_NOV_2028 = r"^(?:(?:Basic[ ._])?A\d+m?(?: v2)?|F\d+s?(?: v2)?|L\d+s v2|GS?\d+|B\d+[a-z]*)" + VM_END  # Av2, F*, Lsv2, G*, B v1
-NO_NEW_RESERVATIONS = r"^[DE]\d+s? v3" + VM_END  # Dv3, Dsv3, Ev3, Esv3
+NO_NEW_RESERVATIONS = r"^[DE]\d+(?:-\d+)?(?:i|s|is)? v3" + VM_END  # Dv3, Dsv3, Ev3, Esv3, constrained E16-4s, isolated E64i/E64is
 PITS = [
     (r"^(?:Log Analytics|Azure Monitor)$", r"^(?!Basic |Auxiliary ).*Data Ingestion",
      "Log Analytics ingestion — trim noisy tables, use Basic logs, or a commitment tier past 100 GB/day", 0),
@@ -808,11 +809,12 @@ def advisor_rec(p, target):
         "resource_type": p.get("impactedField"),
         "sku": ext.get("displaySKU") or ext.get("sku") or ext.get("targetSku"),
         "term": ext.get("term"),
+        "region": ext.get("region") or ext.get("location"),  # a reservation is per region
         "annual_savings": float(savings) if savings not in (None, "") else None,
         "currency": ext.get("savingsCurrency"),
         "subscription": target["name"],
     }
-    return (p.get("recommendationTypeId"), resource, rec["sku"]), rec
+    return (p.get("recommendationTypeId"), resource, rec["sku"], rec["region"]), rec
 
 
 # ---------------------------------------------------------------- AI export
@@ -822,7 +824,9 @@ AI_INSTRUCTIONS = (
     "(ActualCost books reservation and savings plan purchases on the day they were bought; AmortizedCost spreads them "
     "over the term). `current` is the most recent period and `previous` is the equally long period before it. "
     "Line items are Azure meters grouped by service; `totals.credits_and_refunds` is the part of `current` that comes "
-    "from negative line items (credits, refunds). `flags` are known cost traps matched on meter names. `hints` is the "
+    "from negative line items (credits, refunds). `resource_fallback` names subscriptions with so many resources that "
+    "aztree read one total per resource and period for them: their resource groups' amounts are right, but daily "
+    "detail and dev/test always-on checks aren't available there. `flags` are known cost traps matched on meter names. `hints` is the "
     "list the page shows under Worth a look: news (growers, one-off spikes) taking turns with to-dos (money pits, "
     "always-on compute in dev/test groups, idle resources, steady spend worth committing). `advisor` holds "
     "Azure Advisor's cost recommendations, one per kind, resource and SKU, with the largest annual saving Advisor "
@@ -1094,7 +1098,7 @@ def summarize(data):
         s = spike(r["d"], split, floor=max(10, grand * 0.0025))
         if s and tuple(r["k"]) in items and items[tuple(r["k"])]["current"] > 0:  # a charge refunded in full is no news
             spiked[tuple(r["k"])] = hint("spike", items[tuple(r["k"])], s["excess"], date=days[s["day"]],
-                                         day=money(r["d"][s["day"]]), usual=money(s["usual"]))
+                                         day_cost=money(r["d"][s["day"]]), usual=money(s["usual"]))
     advisor = data.get("advisor")
     if advisor is not None:
         advisor = [link_tip(rec, line_items, n) for rec in advisor]
@@ -1147,6 +1151,7 @@ def summarize(data):
         "hints": hints,
         "advisor": advisor,
         "advisor_error": data.get("advisor_error"),
+        "resource_fallback": data.get("resource_fallback") or [],
         "graph_error": data.get("graph_error"),
         "forecast": data.get("forecast"),
         "line_items": line_items,
