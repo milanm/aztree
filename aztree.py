@@ -299,6 +299,134 @@ def advisor_recs(az, target):
     return sorted(best.values(), key=lambda r: -(r["annual_savings"] or -1))
 
 
+# ---------------------------------------------------------------- AI export
+
+AI_INSTRUCTIONS = (
+    "This is an Azure cost breakdown exported by aztree. Amounts are in `currency`, for the cost type in `metric` "
+    "(ActualCost books reservation and savings plan purchases on the day they were bought; AmortizedCost spreads them "
+    "over the term). `current` is the most recent period and `previous` is the equally long period before it. "
+    "Line items are Azure meters grouped by service. `flags` are known cost traps matched on meter names. `advisor` holds "
+    "Azure Advisor's cost recommendations, one per kind, resource and SKU, with the largest annual saving Advisor "
+    "reported; recommendations that cover the same usage (a reservation and a savings plan, a 1-year and a 3-year term) "
+    "are alternatives, not additive. "
+    "Please: 1) explain what drives the cost, 2) explain notable changes vs the previous period, "
+    "3) suggest concrete savings, each with an estimated monthly saving and how to verify it. "
+    "Levers to consider: reservations and savings plans for steady compute and databases; Azure Hybrid Benefit for "
+    "Windows Server and SQL Server licenses already owned; dev/test pricing for non-production subscriptions; "
+    "right-sizing and auto-shutdown for VMs and App Service plans; blob access tiers (cool, cold, archive) and lifecycle "
+    "rules; Log Analytics commitment tier pricing, Basic logs and shorter table retention; and keeping data transfer "
+    "inside one region."
+)
+TOP_RESOURCES = 20  # per resource group in the export; the rest are summed
+
+
+def summarize(data):
+    """Turn the raw daily data into a compact JSON an AI agent can reason about."""
+    days, split = data["days"], data["split"]
+    n = len(days) - split
+
+    def money(v):
+        return round(v, 2)
+
+    def entry(cur, prev):
+        return {
+            "current": money(cur), "previous": money(prev), "change": money(cur - prev),
+            "change_pct": round(100 * (cur - prev) / prev, 1) if prev >= 0.01 else None,
+            "share_pct": round(100 * cur / grand, 2) if grand else 0,
+        }
+
+    def keep(cur, prev):
+        return abs(cur) >= 0.01 or abs(prev) >= 0.01
+
+    def grouped(view):
+        out = {}
+        for r in data["views"][view]["rows"]:
+            cur, prev = sum(r["d"][split:]), sum(r["d"][:split])
+            g = out.setdefault(r["k"][0], {"cur": 0, "prev": 0, "items": {}})
+            g["cur"] += cur
+            g["prev"] += prev
+            it = g["items"].setdefault(r["k"][1], [0, 0])
+            it[0] += cur
+            it[1] += prev
+        return sorted(out.items(), key=lambda kv: -kv[1]["cur"])
+
+    def breakdown(view, key_name, child_name, children="services", label=None, limit=None):
+        names = data["views"][view].get("names", {})
+        out = []
+        for k, g in grouped(view):
+            if not keep(g["cur"], g["prev"]):
+                continue
+            row = {key_name: label(k, names) if label else k}
+            if label:
+                row["id"] = k
+            elif names.get(k):
+                row["name"] = names[k]
+            row.update(entry(g["cur"], g["prev"]))
+            kids = sorted(({child_name: c, **entry(cc, p)} for c, (cc, p) in g["items"].items() if keep(cc, p)),
+                              key=lambda x: -x["current"])
+            row[children] = kids[:limit]
+            if limit and len(kids) > limit:
+                row["other_" + children] = {"count": len(kids) - limit, "current": money(sum(c["current"] for c in kids[limit:]))}
+            out.append(row)
+        return out
+
+    services = grouped("service")
+    grand = sum(g["cur"] for _, g in services)
+    grand_prev = sum(g["prev"] for _, g in services)
+
+    line_items = []
+    for svc, g in services:
+        for meter, (cur, prev) in g["items"].items():
+            if keep(cur, prev):
+                line_items.append({"service": svc, "meter": meter, **entry(cur, prev)})
+    line_items.sort(key=lambda x: -x["current"])
+
+    growers = [x for x in line_items
+               if x["change"] >= max(1, grand * 0.005) and (x["change_pct"] is None or x["change_pct"] > 20)]
+    growers = sorted(growers, key=lambda x: -x["change"])[:10]
+    flags = []
+    for x in line_items:
+        why = pit(x["service"], x["meter"])
+        if why and x["current"] >= grand * 0.002:
+            flags.append({"service": x["service"], "meter": x["meter"], "current": x["current"], "reason": why})
+
+    daily = [0.0] * len(days)
+    for r in data["views"]["service"]["rows"]:
+        for i, v in enumerate(r["d"]):
+            daily[i] += v
+
+    return {
+        "tool": "aztree",
+        "instructions_for_ai": AI_INSTRUCTIONS,
+        "generated": data.get("generated"),
+        "metric": data.get("metric", "ActualCost"),
+        "currency": data.get("currency", "USD"),
+        "subscriptions": data.get("subscriptions", []),
+        "demo_data": bool(data.get("demo")),
+        "period": {
+            "current": {"start": days[split], "end": days[-1], "days": n},
+            "previous": {"start": days[0], "end": days[split - 1], "days": split},
+        },
+        "totals": {**entry(grand, grand_prev), "daily_avg": money(grand / n), "monthly_pace": money(grand / n * 30.4)},
+        "by_service": [{"service": k, **entry(g["cur"], g["prev"])} for k, g in services if keep(g["cur"], g["prev"])],
+        "by_subscription": breakdown("subscription", "subscription_id", "service"),
+        "by_region": breakdown("region", "region", "service"),
+        "by_resource_group": breakdown("resource", "resource_group", "resource_id", "resources",
+                                       label=lambda k, names: names.get(k, k), limit=TOP_RESOURCES),
+        "top_growers": growers,
+        "flags": flags,
+        "advisor": data.get("advisor"),
+        "advisor_error": data.get("advisor_error"),
+        "line_items": line_items,
+        "daily_totals": [{"date": d, "cost": money(v)} for d, v in zip(days, daily)],
+    }
+
+
+def export(data, path):
+    path.write_text(json.dumps(summarize(data), indent=2, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
 def advisor_rec(p, target):
     ext = p.get("extendedProperties") or {}
     short = p.get("shortDescription") or {}

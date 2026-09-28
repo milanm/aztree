@@ -495,6 +495,102 @@ class AdvisorTest(unittest.TestCase):
         self.assertIsNone(data["advisor_error"])
 
 
+DAYS6 = ["2026-09-22", "2026-09-23", "2026-09-24", "2026-09-25", "2026-09-26", "2026-09-27"]
+RG = "/subscriptions/aaaa-1/resourcegroups/rg-app"
+
+
+def make_data(service_rows, resource_rows=(), advisor=None, **extra):
+    """A minimal data dict in the shape fetch() returns. Rows are (k1, k2, [6 daily values]); split after day 3."""
+    def view(dims, rows, names=None):
+        return {"dims": dims, "names": names or {}, "rows": [{"k": [a, b], "d": d} for a, b, d in rows]}
+
+    sub_rows = {}
+    for svc, _, d in service_rows:
+        acc = sub_rows.setdefault(svc, [0.0] * 6)
+        for i, v in enumerate(d):
+            acc[i] += v
+    data = {
+        "days": DAYS6, "split": 3, "currency": "USD", "metric": "ActualCost", "generated": "2026-09-28 09:00",
+        "subscriptions": [{"id": "aaaa-1", "name": "acme-prod", "currency": "USD"}],
+        "views": {
+            "service": view(["ServiceName", "Meter"], service_rows),
+            "subscription": view(["SubscriptionId", "ServiceName"], [("aaaa-1", s, d) for s, d in sub_rows.items()],
+                                 {"aaaa-1": "acme-prod"}),
+            "region": view(["ResourceLocation", "ServiceName"], [("us central", s, d) for s, d in sub_rows.items()]),
+            "resource": view(["ResourceGroupName", "ResourceId"], resource_rows, {RG: "rg-app"}),
+        },
+        "advisor": advisor, "advisor_error": None, "resource_fallback": [], "demo": False,
+    }
+    data.update(extra)
+    return data
+
+
+BASIC = make_data([
+    ("SQL Database", "vCore", [10, 10, 10, 10, 10, 10]),
+    ("Log Analytics", "Analytics Logs Data Ingestion", [2, 2, 2, 6, 6, 6]),
+    ("Storage", "Hot LRS Data Stored", [1, 1, 1, 1, 1, 1]),
+], resource_rows=[(RG, RG + "/providers/microsoft.sql/servers/db1", [10, 10, 10, 10, 10, 10])])
+
+
+class SummarizeTest(unittest.TestCase):
+    def test_totals_compare_the_two_periods(self):
+        t = aztree.summarize(BASIC)["totals"]
+        self.assertEqual((t["current"], t["previous"], t["change"]), (51.0, 39.0, 12.0))
+        self.assertEqual(t["daily_avg"], 17.0)
+        self.assertEqual(t["monthly_pace"], round(17.0 * 30.4, 2))
+
+    def test_periods_are_named(self):
+        p = aztree.summarize(BASIC)["period"]
+        self.assertEqual(p["current"], {"start": "2026-09-25", "end": "2026-09-27", "days": 3})
+        self.assertEqual(p["previous"], {"start": "2026-09-22", "end": "2026-09-24", "days": 3})
+
+    def test_line_items_name_service_and_meter(self):
+        top = aztree.summarize(BASIC)["line_items"][0]
+        self.assertEqual((top["service"], top["meter"], top["current"]), ("SQL Database", "vCore", 30.0))
+
+    def test_growers_and_flags(self):
+        s = aztree.summarize(BASIC)
+        self.assertEqual([g["meter"] for g in s["top_growers"]], ["Analytics Logs Data Ingestion"])
+        self.assertEqual(s["top_growers"][0]["change_pct"], 200.0)
+        self.assertEqual([f["meter"] for f in s["flags"]], ["Analytics Logs Data Ingestion"])
+        self.assertIn("Log Analytics", s["flags"][0]["reason"])
+
+    def test_breakdowns_by_subscription_region_and_resource_group(self):
+        s = aztree.summarize(BASIC)
+        self.assertEqual(s["by_subscription"][0]["name"], "acme-prod")
+        self.assertEqual(s["by_subscription"][0]["current"], 51.0)
+        self.assertEqual(s["by_region"][0]["region"], "us central")
+        rg = s["by_resource_group"][0]
+        self.assertEqual((rg["resource_group"], rg["id"]), ("rg-app", RG))
+        self.assertEqual(rg["resources"][0]["resource_id"], RG + "/providers/microsoft.sql/servers/db1")
+
+    def test_big_resource_groups_list_their_top_resources_only(self):
+        rows = [(RG, f"{RG}/providers/microsoft.web/sites/app{i}", [0, 0, 0, i + 1, 0, 0]) for i in range(25)]
+        rg = aztree.summarize(make_data([("App", "m", [1] * 6)], rows))["by_resource_group"][0]
+        self.assertEqual(len(rg["resources"]), 20)
+        self.assertEqual(rg["other_resources"], {"count": 5, "current": 15.0})
+
+    def test_carries_currency_subscriptions_and_advisor(self):
+        rec = {"problem": "Buy a reservation", "annual_savings": 100.0}
+        s = aztree.summarize(make_data([("A", "m", [1] * 6)], advisor=[rec]))
+        self.assertEqual(s["currency"], "USD")
+        self.assertEqual(s["subscriptions"][0]["name"], "acme-prod")
+        self.assertEqual(s["advisor"], [rec])
+        self.assertEqual(s["tool"], "aztree")
+
+    def test_instructions_speak_azure(self):
+        text = aztree.summarize(BASIC)["instructions_for_ai"]
+        for word in ("Azure", "reservations", "savings plans", "Hybrid Benefit", "dev/test", "commitment tier", "tier"):
+            self.assertIn(word, text)
+        self.assertNotIn("AWS", text)
+
+    def test_export_writes_utf8_json(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            path = aztree.export(make_data([("Storage", "Snapshots · Zürich", [1] * 6)]), Path(d) / "x.json")
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["line_items"][0]["meter"], "Snapshots · Zürich")
+
+
 class ExplainTest(unittest.TestCase):
     def test_403_mentions_cost_management_reader(self):
         self.assertIn("Cost Management Reader", aztree.explain(aztree.AzureError(403, "denied")))
