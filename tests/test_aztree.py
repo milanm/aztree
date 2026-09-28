@@ -1230,6 +1230,15 @@ class HomeTest(unittest.TestCase):
             self.main("--from")
         self.assertIn(str(self.home / "aztree-data.json"), err.getvalue())
 
+    def test_from_after_a_demo_explains_demo_runs_are_not_saved(self):
+        # the README's quick start runs --demo first; the hint must not claim nothing was run
+        page = self.home.parent / "demo.html"
+        self.main("--demo", "--no-open", "--out", str(page))
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            self.main("--from")
+        self.assertIn("--demo runs aren't saved", err.getvalue())
+
 
 class Batch1ReviewTest(unittest.TestCase):
     """Findings from the batch 1 review, each reproduced before it was fixed."""

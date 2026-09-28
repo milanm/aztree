@@ -12,10 +12,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: The tag must match the package version
         run: |
           version=$(python -c "import aztree; print(aztree.__version__)")
           test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME does not match version $version"; exit 1; }
+      - name: Tests must pass before anything is published (PyPI never takes a version twice)
+        run: python -m unittest discover -s tests -v
       - run: python -m pip install build && python -m build
       - uses: actions/upload-artifact@v4
         with:

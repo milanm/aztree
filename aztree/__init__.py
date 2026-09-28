@@ -770,7 +770,7 @@ def main(argv=None):
     if args.source:
         source = Path(args.source)
         if not source.exists():
-            die(f"no saved data at {source}. Run aztree once without --from first.")
+            die(f"no saved data at {source}. Read your costs once with `aztree` first (--demo runs aren't saved).")
         data = json.loads(source.read_text(encoding="utf-8"))
     elif args.demo:
         data = demo(args.days)
