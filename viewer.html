@@ -149,8 +149,9 @@ const N = DATA.days.length, SPLIT = DATA.split, DAYS = N - SPLIT;
 const VIEW_KEYS = ["service", "subscription", "region", "resource"];
 const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-const hashView = decodeURIComponent(location.hash.slice(1));
-const state = { view: DATA.views[hashView] ? hashView : "service", change: false, filter: "", zoom: null, sel: null };
+const hashView = (() => { try { return decodeURIComponent(location.hash.slice(1)); } catch { return ""; } })();
+const state = { view: VIEW_KEYS.includes(hashView) && DATA.views[hashView] ? hashView : "service",
+  change: false, filter: "", zoom: null, sel: null };
 
 // ---------- formatting
 const SYMBOLS = { USD: "$", EUR: "€", GBP: "£", JPY: "¥", CNY: "¥", INR: "₹", KRW: "₩", BRL: "R$", AUD: "A$", CAD: "C$",
@@ -168,7 +169,7 @@ function bigMoney(v) {
   const [w, c] = Math.abs(v).toFixed(2).split(".");
   return `${v < 0 ? "-" : ""}${CUR}${Number(w).toLocaleString("en-US")}<small>.${c}</small>`;
 }
-const pct = v => (v >= 0.1 || v === 0 ? Math.round(v * 100) : (v * 100).toFixed(1)) + "%";
+const pct = v => (Math.abs(v) >= 0.1 || v === 0 ? Math.round(v * 100) : (v * 100).toFixed(1)) + "%";
 const day = s => new Date(s + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" });
 const period = () => `${day(DATA.days[SPLIT])} – ${day(DATA.days[N - 1])}`;
 
@@ -445,7 +446,7 @@ function advisorPanel() {
     top.map((r, i) => `<div class="hint" data-rec="${i}" style="--c:var(--advisor)">
       <div class="hn" title="${esc(r.solution || r.problem)}">${esc(r.problem)}</div>
       <div class="hv">${r.annual_savings ? money(r.annual_savings, sym(r.currency || DATA.currency)) + "/yr" : "–"}</div>
-      <div class="hs" title="${esc(r.resource || "")}">${esc([r.resource_name, r.sku, TERM[r.term]].filter(Boolean).join(" · "))}</div>
+      <div class="hs" title="${esc(r.resource || "")}">${esc([r.resource_name, r.sku, Object.hasOwn(TERM, r.term) && TERM[r.term]].filter(Boolean).join(" · "))}</div>
       <div class="hb"><i style="width:${((r.annual_savings || 0) / max) * 100}%"></i></div></div>`).join("") +
     (recs.length > SHOWN_RECS ? `<div class="note">+${recs.length - SHOWN_RECS} more in Export for AI</div>` : "") + `</section>`;
 }

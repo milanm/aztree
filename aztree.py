@@ -237,7 +237,7 @@ def query(az, scope, start, end, groupings, metric, aggs=("Cost", "CostUSD"), ma
         props = az.call("POST", url, body, tenant=tenant).get("properties", {})
         cols = [c["name"] for c in props.get("columns", [])]
         if cols and aggs[0] not in cols:
-            raise AzureError(0, f"Cost Management answered without a {aggs[0]} column (columns: {', '.join(cols)})")
+            raise AzureError(200, f"Cost Management answered without a {aggs[0]} column (columns: {', '.join(cols)})")
         rows += [dict(zip(cols, r)) for r in props.get("rows", [])]
         url = props.get("nextLink")
     return rows

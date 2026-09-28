@@ -1073,7 +1073,36 @@ class SecondReviewTest(unittest.TestCase):
     render = ViewerTest.render
 
 
+@unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+class ViewerEdgesTest(unittest.TestCase):
+    render = ViewerTest.render
+    run_page = ViewerTest.run_page
+
+    def test_drops_are_formatted_like_rises(self):
+        page = self.run_page(make_data([("Storage", "LRS", [2, 2, 2, 1, 1, 1])]), "service")
+        self.assertIn("-50%", page["side"])
+        self.assertNotIn("-50.0%", page["side"])
+
+    def test_odd_url_hashes_fall_back_to_the_service_view(self):
+        for view in ("constructor", "__proto__", "%E0"):
+            with self.subTest(view=view):
+                page = self.run_page(make_data([("Storage", "LRS", [1] * 6)]), view)
+                self.assertIn("all services", page["crumbs"])
+
+    def test_unknown_term_is_not_looked_up_on_the_prototype(self):
+        rec = {"problem": "Buy a reservation", "solution": "", "resource": "/subscriptions/aaaa-1", "resource_name": "acme-prod",
+               "sku": "x", "term": "constructor", "annual_savings": 10.0, "currency": "USD", "subscription": "acme-prod"}
+        page = self.run_page(make_data([("Storage", "LRS", [1] * 6)], advisor=[rec]), "service")
+        self.assertNotIn("native code", page["side"])
+
+
 class ExplainTest(unittest.TestCase):
+    def test_bad_response_is_not_blamed_on_the_network(self):
+        send = FakeSend(page(["UsageDate", "ServiceName", "Meter"], [[20260925, "Storage", "LRS"]]))
+        with self.assertRaises(aztree.AzureError) as ctx:
+            aztree.query(client(send), "/subscriptions/s1", "2026-09-22", "2026-09-27", ["ServiceName", "Meter"], "ActualCost")
+        self.assertNotIn("network", aztree.explain(ctx.exception))
+
     def test_403_mentions_cost_management_reader(self):
         self.assertIn("Cost Management Reader", aztree.explain(aztree.AzureError(403, "denied")))
 
