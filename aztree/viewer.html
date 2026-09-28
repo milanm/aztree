@@ -101,8 +101,14 @@ aside { grid-column: 2; grid-row: 2 / 4; border-left: 1px solid var(--line); bac
 .hs { color: var(--dim); font-size: 11px; margin-top: 3px; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical;
   -webkit-line-clamp: 2; line-clamp: 2; } /* two lines: the reason is the point of a hint */
 .tag { color: var(--c, var(--accent)); font-size: 9.5px; letter-spacing: .7px; text-transform: uppercase; margin-right: 6px; }
-.foot { margin-top: auto; border-top: 1px solid var(--line); padding-top: 14px; }
-.foot .h b { color: var(--advisor); }
+/* Advisor's header waits at the bottom of the panel while the lists scroll; a click scrolls to its tips */
+.advh { position: sticky; bottom: 0; margin-top: auto; border-top: 1px solid var(--line); padding: 12px 0 10px;
+  background: var(--panel); cursor: pointer; z-index: 1; }
+.advh b { color: var(--advisor); }
+.advh + section { margin-top: -14px; }
+/* on a tall screen the selection stays in view too; on a laptop it would leave the lists too little room */
+@media (min-height: 900px) { #side > section:first-child { position: sticky; top: -14px; padding-top: 14px; margin-top: -14px;
+  background: var(--panel); z-index: 1; } }
 .note { color: var(--dim); margin-top: 9px; }
 .showall { color: var(--muted); margin-top: 10px; font-size: 11px; cursor: pointer; }
 .showall:hover { color: var(--text); }
@@ -122,6 +128,7 @@ kbd { font: 10.5px ui-monospace, Menlo, monospace; color: var(--muted); border: 
 @media (max-width: 900px) {
   .app { grid-template-columns: 1fr; grid-template-rows: auto auto 60vh auto auto; overflow-y: auto; }
   aside { grid-column: 1; grid-row: 4; border-left: 0; border-top: 1px solid var(--line); }
+  .advh, #side > section:first-child { position: static; } /* stacked, the page scrolls, not the panel */
   footer { grid-row: 5; }
   header { flex-wrap: wrap; } .legend { display: none; }
 }
@@ -531,10 +538,11 @@ function advisorPanel() {
     const why = !err ? "Advisor has no cost recommendations."
       : /^HTTP 40[13]\b/.test(err) ? "Advisor wasn't readable with this login (needs Reader)."
       : `Advisor couldn't be read (${esc(err)}).`;
-    return `<section class="foot"><div class="h">Advisor</div><div class="note">${why}</div></section>`;
+    return `<div class="advh h">Advisor</div><section><div class="note">${why}</div></section>`;
   }
   const top = state.expanded.recs ? recs : recs.slice(0, SHOWN_RECS);
-  return `<section class="foot"><div class="h">Advisor <b>${recs.length} cost tip${recs.length > 1 ? "s" : ""}</b></div>` +
+  // the header is the aside's own child, so it can stick to the bottom while the lists above it scroll
+  return `<div class="advh h" data-adv>Advisor <b>${recs.length} cost tip${recs.length > 1 ? "s" : ""}</b></div><section>` +
     top.map((r, i) => row(`data-rec="${i}"`, "var(--advisor)", r.problem, r.solution || r.problem,
       r.annual_savings ? money(r.annual_savings, sym(r.currency || DATA.currency)) + "/yr" : "–", null, esc(tipLine(r)),
       [r.resource_name, r.sku, Object.hasOwn(TERM, r.term) && TERM[r.term]].filter(Boolean).join(" · "))).join("") +
@@ -697,6 +705,7 @@ $("#crumbs").addEventListener("click", e => { if (e.target.closest("[data-up]"))
 // typing dims what doesn't match; the map keeps its shape, and the zoom and selection stay
 $("#filter").addEventListener("input", e => { state.filter = e.target.value.trim(); state.collapsed = false; rebuild(); render(); });
 $("#side").addEventListener("click", e => {
+  if (e.target.closest("[data-adv]")) { $("#side").scrollTop = $("#side").scrollHeight; return; }
   const more = e.target.closest("[data-more]");
   if (more) { state.expanded[more.dataset.more] = !state.expanded[more.dataset.more]; renderSide(); return; }
   const h = e.target.closest("[data-hint]"), dr = e.target.closest("[data-drop]"), r = e.target.closest("[data-rec]");
@@ -758,7 +767,8 @@ map.addEventListener("mousemove", e => {
   const n = c._n, d = n.cur - n.prev;
   const ch = n.prev < 0.01 ? "new" : `${d >= 0 ? "+" : ""}${pct(d / n.prev)} vs prev`;
   tip.innerHTML = `<div class="t1">${n.kind === "leaf" ? esc(n.parent.name) + " / " : ""}<b>${esc(n.name)}</b></div>
-    <div class="t2">${money(n.cur)} · ${pct(grand ? n.cur / grand : 0)} of bill · ${ch}</div>`;
+    <div class="t2">${money(n.cur)} · ${pct(grand ? n.cur / grand : 0)} of bill${n.kind === "leaf" && n.parent.cur > 0
+      ? ` · ${pct(n.cur / n.parent.cur)} of ${esc(n.parent.name)}` : ""} · ${ch}</div>`;
   tip.style.display = "block";
   const tw = tip.offsetWidth, th = tip.offsetHeight;
   tip.style.left = Math.min(e.clientX + 14, innerWidth - tw - 8) + "px";

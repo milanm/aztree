@@ -2347,6 +2347,23 @@ class ZoomAnimationTest(unittest.TestCase):
         self.assertRegex(TEMPLATE, r"new ResizeObserver\(\(\) => \{ anim\?\.cancel\(\);")
 
 
+@unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+class PanelTest(unittest.TestCase):
+    render = ViewerTest.render
+    run_page = ViewerTest.run_page
+
+    def test_the_advisor_header_sticks_to_the_bottom_of_the_panel(self):
+        side = self.run_page(make_data([("Storage", "LRS", [5] * 6)], advisor=ShowAllTest.RECS), "service")["side"]
+        i = side.index('class="advh')
+        self.assertEqual(side[:i].count("<section"), side[:i].count("</section>"))  # a direct child of the aside
+        self.assertRegex(TEMPLATE, r"\.advh \{[^}]*position: sticky; bottom: 0")
+        self.assertRegex(TEMPLATE, r"@media \(min-height: 900px\) \{[^}]*#side > section:first-child \{[^}]*position: sticky")
+
+    def test_the_tooltip_gives_share_of_parent_for_a_box(self):
+        page = self.run_page(make_data(FilterDimTest.DATA), "service", click={"hover": "LRS Snapshots"})
+        self.assertIn("29% of Storage", page["tip"])
+
+
 class ExplainTest(unittest.TestCase):
     def test_bad_response_is_not_blamed_on_the_network(self):
         send = FakeSend(page(["UsageDate", "ServiceName", "Meter"], [[20260925, "Storage", "LRS"]]))
