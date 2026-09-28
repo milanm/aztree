@@ -24,6 +24,7 @@ import urllib.request
 import webbrowser
 from collections import Counter
 from importlib import resources
+from itertools import zip_longest
 from pathlib import Path
 
 def home():
@@ -678,17 +679,27 @@ def summarize(data):
                 line_items.append({"service": svc, "meter": meter, **entry(cur, prev)})
     line_items.sort(key=lambda x: -x["current"])
 
-    growers = [x for x in line_items
-               if x["change"] >= max(1, grand * 0.005) and (x["change_pct"] is None or x["change_pct"] > 20)]
-    growers = sorted(growers, key=lambda x: -x["change"])[:10]
+    growing = sorted((x for x in line_items
+                      if x["change"] >= max(1, grand * 0.005) and (x["change_pct"] is None or x["change_pct"] > 20)),
+                     key=lambda x: -x["change"])
+    growers = growing[:10]
     drops = [x for x in line_items  # a refund (negative now) is a credit, not a saving: it goes in credits_and_refunds
              if x["current"] > -0.01 and x["change"] <= -max(1, grand * 0.005) and (x["change_pct"] or 0) < -20]
     drops = sorted(drops, key=lambda x: x["change"])[:10]
-    flags = []
-    for x in line_items:
+    # worth a look: news (what changed) takes turns with to-dos (what to fix), each sorted by its own dollars
+    def hint(kind, x, amount, **extra):
+        return {"kind": kind, "service": x["service"], "meter": x["meter"], "current": x["current"],
+                "previous": x["previous"], "change": x["change"], "amount": money(amount), **extra}
+
+    flags, todos = [], []
+    for x in line_items:  # biggest first
         why = pit(x["service"], x["meter"])
         if why and x["current"] >= grand * 0.002:
             flags.append({"service": x["service"], "meter": x["meter"], "current": x["current"], "reason": why})
+            todos.append(hint("pit", x, x["current"], reason=why))
+    flagged = {(f["service"], f["meter"]) for f in flags}
+    news = [hint("grower", x, x["change"]) for x in growing if (x["service"], x["meter"]) not in flagged]
+    hints = [h for pair in zip_longest(news, todos) for h in pair if h]
 
     daily = [0.0] * len(days)
     for r in data["views"]["service"]["rows"]:
@@ -717,6 +728,7 @@ def summarize(data):
         "top_growers": growers,
         "top_drops": drops,
         "flags": flags,
+        "hints": hints,
         "advisor": data.get("advisor"),
         "advisor_error": data.get("advisor_error"),
         "line_items": line_items,
@@ -733,7 +745,7 @@ def export(data, path):
 
 def render(data, out):
     html = template()
-    page = {**data, "pits": PITS, "export": summarize(data)}
+    page = {**data, "export": summarize(data)}  # the page reads its hints from the export: one source of truth
     # < keeps names like "</script>" or "<!--" from ending the script block early
     blob = json.dumps(page, separators=(",", ":"), ensure_ascii=False).replace("<", "\\u003c")
     out.write_text(html.replace("__AZTREE_DATA__", blob), encoding="utf-8")

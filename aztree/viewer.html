@@ -496,26 +496,20 @@ function biggestDrops() {
     .sort((a, b) => a.d - b.d).slice(0, 3));
 }
 
-// ---------- worth a look: known money pits + fastest growers (always from the service view)
-const PITS = (DATA.pits || []).map(([s, m, why]) => [new RegExp(s), new RegExp(m), why]); // rules live in aztree.py
+// ---------- worth a look: the hints aztree.py computed (the export's `hints`, in order), placed on the service view
+const HINT_COLOR = { grower: "var(--up)", pit: "var(--accent)" };
 let _hints;
 function worthALook() {
   if (_hints) return _hints;
-  const t = buildTree("service", ""), leaves = t.children.flatMap(g => g.children), out = [], seen = new Set();
-  const minCost = t.cur * 0.002;
-  for (const n of leaves) {
-    const pit = PITS.find(([s, m]) => s.test(n.parent.key) && m.test(n.key));
-    if (pit && n.cur >= minCost) { out.push({ n, why: pit[2], c: "var(--accent)" }); seen.add(n); }
-  }
-  for (const n of leaves) {
-    const d = n.cur - n.prev;
-    if (seen.has(n) || d < t.cur * 0.005 || d < 1) continue;
-    const why = n.prev < 0.01 ? "new this period" : `up ${pct(d / n.prev)} (+${money(d)}) vs previous ${DAYS}d`;
-    if (n.prev < 0.01 || d / n.prev > 0.2) out.push({ n, why, c: "var(--up)", d });
-  }
-  const pits = out.filter(h => !h.d).sort((a, b) => b.n.cur - a.n.cur);
-  const growers = out.filter(h => h.d).sort((a, b) => b.d - a.d);
-  return (_hints = [...growers, ...pits]); // the panel shows the first few; "show all" opens the rest
+  const t = buildTree("service", ""), leaves = new Map();
+  for (const g of [...t.children, ...t.gone]) for (const n of [...g.children, ...(g.gone || [])]) leaves.set(`${g.key}\u0000${n.key}`, n);
+  return (_hints = (DATA.export?.hints || [])
+    .map(h => ({ h, n: leaves.get(`${h.service}\u0000${h.meter}`), why: hintText(h), c: HINT_COLOR[h.kind] || "var(--accent)" }))
+    .filter(x => x.n)); // the panel shows the first few; "show all" opens the rest
+}
+function hintText(h) {
+  if (h.kind === "grower") return h.previous < 0.01 ? "new this period" : `up ${pct(h.change / h.previous)} (+${money(h.change)}) vs previous ${DAYS}d`;
+  return h.reason || "";
 }
 
 // ---------- interaction

@@ -1304,6 +1304,45 @@ class Batch1ReviewTest(unittest.TestCase):
         self.assertIn('<div class="sel-name">Old disk</div>', page["side"])
 
 
+class HintsTest(unittest.TestCase):
+    """Every worth-a-look hint is computed once, in summarize(); the page and the AI export both read it."""
+    GROWING = [("Log Analytics", "Analytics Logs Data Ingestion", [2, 2, 2, 6, 6, 6]),  # a pit that also grows
+               ("SQL Database", "RA-GRS Data Stored", [5, 5, 5, 10, 10, 10]),         # a grower, no rule
+               ("Storage", "Hot LRS Data Stored", [1] * 6)]
+
+    def test_a_meter_is_either_a_pit_or_a_grower(self):
+        hints = aztree.summarize(make_data(self.GROWING))["hints"]
+        self.assertEqual([(h["kind"], h["meter"]) for h in hints],
+                         [("grower", "RA-GRS Data Stored"), ("pit", "Analytics Logs Data Ingestion")])
+        grower = hints[0]
+        self.assertEqual((grower["current"], grower["previous"], grower["change"]), (30.0, 15.0, 15.0))
+        self.assertIn("Log Analytics", hints[1]["reason"])
+
+    def test_news_and_to_dos_take_turns(self):
+        rows = [("SQL Database", "RA-GRS Data Stored", [5, 5, 5, 20, 20, 20]),        # grower +45
+                ("Storage", "Hot LRS Write Operations", [2, 2, 2, 6, 6, 6]),          # grower +12
+                ("Log Analytics", "Analytics Logs Data Ingestion", [30] * 6),         # pit 90
+                ("Bandwidth", "Standard Data Transfer Out", [10] * 6)]                # pit 30
+        kinds = [(h["kind"], h["meter"]) for h in aztree.summarize(make_data(rows))["hints"]]
+        self.assertEqual(kinds, [("grower", "RA-GRS Data Stored"), ("pit", "Analytics Logs Data Ingestion"),
+                                 ("grower", "Hot LRS Write Operations"), ("pit", "Standard Data Transfer Out")])
+
+    def test_the_page_no_longer_carries_the_rules(self):
+        self.assertNotIn("DATA.pits", TEMPLATE)
+        out = scratch_dir(self) / "page.html"
+        aztree.render(make_data(self.GROWING), out)
+        self.assertNotIn('"pits":', out.read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_the_page_shows_the_exported_hints(self):
+        page = ViewerTest.run_page(self, make_data(self.GROWING), "service")
+        self.assertIn("up 100% (+$15.00) vs previous 3d", page["side"])
+        self.assertIn("Log Analytics ingestion", page["side"])
+        self.assertEqual(page["side"].count('data-hint="'), 2)
+
+    render = ViewerTest.render
+
+
 @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
 class ShowAllTest(unittest.TestCase):
     render = ViewerTest.render
