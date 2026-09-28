@@ -611,22 +611,26 @@ const isTodo = n => n.kind === "leaf" && !n.more && (marks().has(n.parent.key + 
 function showView(v) {
   state.view = v; state.zoom = null; state.sel = null;
   root = buildTree(v, state.filter, narrowed());
-  history.replaceState(null, "", "#" + v);
+}
+// Back and Forward: a view change, a zoom and a jump are steps; selecting only updates the step you're on
+function remember(push) {
+  const s = { view: state.view, zoom: state.zoom, sel: findNode(selKey(state.sel)) === state.sel ? selKey(state.sel) : null };
+  history[push ? "pushState" : "replaceState"](s, "", "#" + state.view);
 }
 function setView(v) {
   if (!DATA.views[v] || v === state.view) return;
-  showView(v); render();
+  showView(v); render(); remember(true);
 }
 function select(n) {
   if (state.sel?._el) state.sel._el.classList.remove("sel");
   state.sel = n;
   if (n?._el?.isConnected) n._el.classList.add("sel");
-  renderSide();
+  renderSide(); remember(false);
 }
 function open(n) {
   const g = n?.kind === "leaf" ? n.parent : n;
   if (g?.kind !== "group" || state.zoom === g.key) return; // already inside: a second click is not a second zoom
-  state.zoom = g.key; render();
+  state.zoom = g.key; render(); remember(true);
 }
 // Tab walks the drawn boxes by size among the selection's siblings (disktree: scanning for space is this walk)
 function step(dir) {
@@ -636,7 +640,7 @@ function step(dir) {
   select(peers[i < 0 ? 0 : Math.max(0, Math.min(peers.length - 1, i + dir))]);
 }
 function up() {
-  if (state.zoom !== null) { const g = zoomed(); state.zoom = null; state.sel = g || null; render(); }
+  if (state.zoom !== null) { const g = zoomed(); state.zoom = null; state.sel = g || null; render(); remember(true); }
   else if (state.sel) select(null);
 }
 function clearFilter() { state.filter = ""; state.collapsed = false; $("#filter").value = ""; }
@@ -648,8 +652,18 @@ function reveal(view, find) {
     const leaf = g.children.find(find);
     if (leaf) { state.zoom = g.key; state.sel = leaf; break; }
   }
-  render();
+  render(); remember(true);
 }
+addEventListener("popstate", e => {
+  const s = e.state;
+  if (!s || !Object.hasOwn(DATA.views, s.view)) return;
+  clearFilter();
+  showView(s.view); // not setView: Back to the same view with another zoom must still land
+  const z = s.zoom ?? null; // "" is a real zoom key (no region, untagged)
+  if (z !== null && root.children.some(g => g.key === z)) state.zoom = z;
+  state.sel = findNode(s.sel);
+  render();
+});
 
 // one button per view the data has; the tag view's is named after its tag
 const VIEW_NAMES = { service: "Service", subscription: "Subscription", region: "Region", resource: "Resource" };
@@ -740,6 +754,7 @@ $("#meta").innerHTML = (DATA.demo ? `<span class="badge">demo data</span> ` : ""
   ` · <a href="https://github.com/petricbranko/awstree" target="_blank" rel="noopener">a port of awstree</a>`;
 let raf;
 render();
+remember(false);
 new ResizeObserver(() => { cancelAnimationFrame(raf); raf = requestAnimationFrame(render); }).observe(map);
 </script>
 </body>

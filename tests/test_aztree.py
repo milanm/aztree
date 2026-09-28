@@ -2294,6 +2294,42 @@ class NavKeysTest(unittest.TestCase):
         self.assertIn("all services", page["crumbs"])
 
 
+@unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+class HistoryTest(unittest.TestCase):
+    render = ViewerTest.render
+    run_page = ViewerTest.run_page
+    DATA = FilterDimTest.DATA
+
+    def test_zooms_and_jumps_push_and_selecting_replaces(self):
+        page = self.run_page(make_data(self.DATA), "service", click=[{"map": "click", "name": "Storage"}] * 2)
+        self.assertEqual([c[0] for c in page["history"]], ["replace", "replace", "push"])  # load, select, open
+        self.assertEqual(page["history"][-1][1], {"view": "service", "zoom": "Storage", "sel": ["Storage", None]})
+        self.assertEqual(page["history"][-1][2], "#service")
+
+    def test_back_restores_view_zoom_and_selection(self):
+        state = {"view": "service", "zoom": "Storage", "sel": ["Storage", "LRS Snapshots"]}
+        page = self.run_page(make_data(self.DATA), "region", click={"pop": state})
+        self.assertIn('<span class="cur">Storage</span>', page["crumbs"])
+        self.assertIn('<div class="sel-name">LRS Snapshots</div>', page["side"])
+
+    def test_the_empty_zoom_key_survives_the_round_trip(self):
+        data = make_data([("Storage", "LRS", [1] * 6)])
+        data["views"]["region"]["rows"] = [{"k": ["", "Storage"], "d": [1] * 6}]
+        page = self.run_page(data, "service", click={"pop": {"view": "region", "zoom": "", "sel": None}})
+        self.assertIn('<span class="cur">(no region)</span>', page["crumbs"])
+
+    def test_a_zoom_that_is_gone_falls_back_to_the_top(self):
+        page = self.run_page(make_data(self.DATA), "service", click={"pop": {"view": "service", "zoom": "Nope", "sel": ["Nope", "x"]}})
+        self.assertIn("all services", page["crumbs"])
+        self.assertIn('<div class="sel-name">Everything</div>', page["side"])
+
+    def test_a_hint_jump_is_a_step_back_can_undo(self):
+        data = make_data([("Log Analytics", "Analytics Logs Data Ingestion", [30] * 6)])
+        page = self.run_page(data, "resource", click="[data-hint]:0")
+        self.assertEqual(page["history"][-1][0], "push")
+        self.assertEqual(page["history"][-1][1]["view"], "service")
+
+
 class ExplainTest(unittest.TestCase):
     def test_bad_response_is_not_blamed_on_the_network(self):
         send = FakeSend(page(["UsageDate", "ServiceName", "Meter"], [[20260925, "Storage", "LRS"]]))
