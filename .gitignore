@@ -1,8 +1,8 @@
-# Generated output: contains your AWS account IDs and billing data. Never commit it.
+# Generated output: contains your subscription IDs and costs. Never commit it.
 out/
-awstree-data.json
-awstree-export.json
-awstree.html
+aztree-data.json
+aztree-export.json
+aztree.html
 
 __pycache__/
 *.pyc
