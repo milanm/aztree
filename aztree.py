@@ -268,8 +268,14 @@ def group_key(target, rg, resource_id):
     return f"{sub}/resourcegroups/{rg.lower()}" if rg else sub
 
 
+def last_full_day(today=None):
+    """The day before yesterday. Azure takes 8-24 hours to post usage, so yesterday is still filling in
+    and would drag down every comparison, grower and pace figure."""
+    return (today or dt.date.today()) - dt.timedelta(2)
+
+
 def fetch(az, targets, days, metric, advisor=True, log=print, today=None):
-    end = (today or dt.date.today()) - dt.timedelta(1)  # through yesterday: today is still arriving
+    end = last_full_day(today)
     start = end - dt.timedelta(2 * days - 1)  # current window + previous window, for the "vs prev" deltas
     dates = [(start + dt.timedelta(i)).isoformat() for i in range(2 * days)]
     index = {d.replace("-", ""): i for i, d in enumerate(dates)}
@@ -457,7 +463,7 @@ def demo_advisor():
 
 def demo(days, today=None):
     rnd = random.Random(7)
-    end = (today or dt.date.today()) - dt.timedelta(1)
+    end = last_full_day(today)
     n = 2 * days
     dates = [(end - dt.timedelta(n - 1 - i)).isoformat() for i in range(n)]
     weekend = [dt.date.fromisoformat(d).weekday() >= 5 for d in dates]

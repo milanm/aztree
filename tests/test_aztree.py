@@ -217,7 +217,7 @@ class ListSubscriptionsTest(unittest.TestCase):
         self.assertEqual(send.calls[0]["method"], "GET")
 
 
-TODAY = aztree.dt.date(2026, 9, 28)  # with days=3 the window is Sep 22..27, split after Sep 24
+TODAY = aztree.dt.date(2026, 9, 29)  # with days=3 the window is Sep 22..27 (ends the day before yesterday)
 
 
 class Router:
@@ -287,8 +287,10 @@ def rows_of(data, view):
 
 
 class FetchTest(unittest.TestCase):
-    def test_window_is_two_periods_ending_yesterday(self):
+    def test_window_is_two_periods_ending_the_day_before_yesterday(self):
+        # yesterday is still arriving (Azure takes 8-24 h), so a partial day would drag down every comparison
         data, router = fetch(ONE_SUB)
+        self.assertEqual(data["days"][-1], (TODAY - aztree.dt.timedelta(2)).isoformat())
         self.assertEqual(data["days"], ["2026-09-22", "2026-09-23", "2026-09-24", "2026-09-25", "2026-09-26", "2026-09-27"])
         self.assertEqual(data["split"], 3)
         self.assertEqual(router.bodies[0]["timePeriod"], {"from": "2026-09-22T00:00:00Z", "to": "2026-09-27T23:59:59Z"})
