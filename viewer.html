@@ -53,6 +53,10 @@ label.chk input { accent-color: var(--accent); margin: 0; }
 .cell { position: absolute; overflow: hidden; border-radius: 2px; cursor: pointer; }
 .leaf { background: color-mix(in srgb, var(--c) 30%, var(--bg)); border: 1px solid color-mix(in srgb, var(--c) 48%, var(--bg)); padding: 3px 5px; }
 .leaf:hover { background: color-mix(in srgb, var(--c) 46%, var(--bg)); }
+.leaf.tiny { padding: 0; } /* smaller than its padding, a box would render bigger than its slot and spill over */
+.leaf.more { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--c) 20%, var(--bg)) 0 4px,
+  color-mix(in srgb, var(--c) 30%, var(--bg)) 4px 8px); }
+.leaf.more .n { color: var(--muted); }
 .group { background: color-mix(in srgb, var(--c) 9%, var(--bg)); border: 1px solid color-mix(in srgb, var(--c) 30%, var(--bg));
   border-top: 2px solid color-mix(in srgb, var(--c) 75%, var(--bg)); }
 .gh { display: flex; justify-content: space-between; gap: 6px; padding: 1px 5px; height: 17px; white-space: nowrap; }
@@ -215,6 +219,7 @@ const match = (rules, s) => (rules.find(([, re]) => re.test(s)) || [])[0];
 const svcCat = s => match(SVC_RULES, s) || "other";
 
 function category(n) {
+  if (n.more) return null; // a mix of whatever was too small to draw
   const [A, B] = DATA.views[state.view].dims;
   const dim = n.kind === "leaf" ? B : A;
   if (dim === "Meter") return match(METER_RULES, n.key) || svcCat(n.parent.key);
@@ -310,8 +315,24 @@ function cell(cls, n, r, gap) {
   place(el, r, gap);
   return el;
 }
+// the long tail: boxes too small to read or click become one "+N more" box (double-click opens the group)
+const MIN_BOX = 16 * 16; // px²
+function fold(nodes, w, h) {
+  const total = nodes.reduce((s, n) => s + n.cur, 0), px = total > 0 ? (w * h) / total : 0;
+  const i = nodes.findIndex(n => n.cur * px < MIN_BOX);
+  if (i < 0 || nodes.length - i < 2) return nodes;
+  const rest = nodes.slice(i), dim = rest[0].dim;
+  const more = { kind: "leaf", more: rest.length, key: "\u0000more", name: `+${rest.length} more`, dim, parent: rest[0].parent,
+    full: `${rest.length} smaller ${DIM[dim].many}`, cur: 0, prev: 0, daily: new Float64Array(N) };
+  for (const n of rest) {
+    more.cur += n.cur; more.prev += n.prev;
+    for (let d = 0; d < N; d++) more.daily[d] += n.daily[d];
+  }
+  return [...nodes.slice(0, i), more].sort((a, b) => b.cur - a.cur);
+}
 function drawLeaf(frag, r) {
-  const el = cell("leaf", r.n, r, 1);
+  const tiny = r.w < 14 || r.h < 10;
+  const el = cell("leaf" + (tiny ? " tiny" : "") + (r.n.more ? " more" : ""), r.n, r, 1);
   if (r.w > 42 && r.h > 17) el.innerHTML = `<div class="n">${esc(r.n.name)}</div>` + (r.h > 32 ? `<div class="v">${money(r.n.cur)}</div>` : "");
   frag.append(el);
 }
@@ -320,7 +341,7 @@ function drawGroup(frag, r) {
   frag.append(el);
   if (r.w > 46 && r.h > 40) {
     el.innerHTML = `<div class="gh"><span class="n">${esc(r.n.name)}</span><span class="v">${money(r.n.cur)}</span></div>`;
-    for (const c of squarify(r.n.children, r.x + 4, r.y + 21, r.w - 8, r.h - 25)) drawLeaf(frag, c);
+    for (const c of squarify(fold(r.n.children, r.w - 8, r.h - 25), r.x + 4, r.y + 21, r.w - 8, r.h - 25)) drawLeaf(frag, c);
   } else if (r.w > 30 && r.h > 16) {
     el.innerHTML = `<div class="gh"><span class="n">${esc(r.n.name)}</span></div>`;
   }
@@ -334,7 +355,8 @@ function render() {
   if (!base.children.length) {
     map.innerHTML = `<div class="empty">${state.filter ? "Nothing matches “" + esc(state.filter) + "”" : "No spend in this period"}</div>`;
   } else {
-    for (const r of squarify(base.children, 0, 0, W, H)) base === root ? drawGroup(frag, r) : drawLeaf(frag, r);
+    if (base === root) for (const r of squarify(base.children, 0, 0, W, H)) drawGroup(frag, r);
+    else for (const r of squarify(fold(base.children, W, H), 0, 0, W, H)) drawLeaf(frag, r);
     map.replaceChildren(frag);
   }
   if (state.sel?._el?.isConnected) state.sel._el.classList.add("sel");
@@ -377,7 +399,7 @@ function renderSide() {
     : `<b class="${d > 0 ? "upc" : "downc"}">${d > 0 ? "+" : ""}${pct(d / n.prev)}</b> <b style="color:var(--dim)">${d > 0 ? "+" : ""}${money(d)}</b>`;
   const path = n.kind === "leaf" ? (n.full.startsWith("/") ? n.full : `${n.parent.name} / ${n.full}`)
     : n.kind === "group" ? n.full : `${DIM[A].many} → ${DIM[B].many}`;
-  const kind = n.kind === "root" ? "whole bill" : DIM[n.dim].one;
+  const kind = n.kind === "root" ? "whole bill" : n.more ? `${n.more} ${DIM[n.dim].many}` : DIM[n.dim].one;
   const title = n.kind === "root" ? (state.filter ? `“${state.filter}”` : "Everything") : n.name;
 
   let html = `<section><div class="h">Selection</div>

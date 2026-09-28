@@ -648,6 +648,8 @@ console.log(JSON.stringify({
   boxes: made.map(e => e.innerHTML).join("\n"),
   side: byId["#side"].innerHTML, sub: byId["#sub"].innerHTML, meta: byId["#meta"].innerHTML,
   crumbs: byId["#crumbs"].innerHTML,
+  leafBoxes: made.filter(e => e.className.split(" ").includes("leaf"))
+    .map(e => ({ cls: e.className, name: e._n.name, w: parseFloat(e.style.width), h: parseFloat(e.style.height) })),
 }));
 """
 
@@ -1045,6 +1047,22 @@ class SecondReviewTest(unittest.TestCase):
         self.assertEqual(asked, ["t-one", "t-two"])  # once per tenant, then cached
         self.assertEqual({auth for scope, auth in seen if scope.endswith("aaaa-1")}, {"Bearer tok-t-one"})
         self.assertEqual({auth for scope, auth in seen if scope.endswith("bbbb-2")}, {"Bearer tok-t-two"})
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_long_tail_folds_into_one_more_box(self):
+        meters = [("Storage", "Hot LRS Data Stored", [1000] * 6)] + [("Storage", f"meter {i}", [0.1] * 6) for i in range(30)]
+        page = ViewerTest.run_page(self, make_data(meters), "service")
+        self.assertEqual(sorted(b["name"] for b in page["leafBoxes"]), ["+30 more", "Hot LRS Data Stored"])
+        self.assertIn("more", next(b["cls"] for b in page["leafBoxes"] if b["name"] == "+30 more"))
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_boxes_too_small_for_padding_drop_it(self):
+        page = ViewerTest.run_page(self, make_data([("Storage", "Big", [1000] * 6), ("Storage", "Small", [0.05] * 6)]), "service")
+        small = [b for b in page["leafBoxes"] if b["w"] < 14 or b["h"] < 10]
+        self.assertTrue(small, page["leafBoxes"])
+        for b in small:
+            self.assertIn("tiny", b["cls"])
+        self.assertRegex(TEMPLATE, r"\.leaf\.tiny\s*\{[^}]*padding:\s*0")
 
     def test_a_selected_group_stays_under_its_boxes(self):
         # groups and their leaves are siblings; lifting a selected group would cover its leaves
