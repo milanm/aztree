@@ -186,7 +186,7 @@ const DIM = {
   SubscriptionId: { one: "subscription", many: "subscriptions", label: (v, names) => names[v] || v },
   ResourceLocation: { one: "region", many: "regions", label: v => v || "(no region)" },
   ResourceGroupName: { one: "resource group", many: "resource groups", label: (v, names) => names[v] || lastSeg(v) },
-  // the resource view falls back to services per group when a subscription has too many resources
+  // resources without an id (some marketplace and support charges) keep a plain label
   ResourceId: { one: "resource", many: "resources", label: v => (v.startsWith("/") ? lastSeg(v) : shortSvc(v)) },
 };
 const CATS = [
@@ -272,7 +272,8 @@ function buildTree(viewKey, filter) {
   return root;
 }
 let root = buildTree(state.view, "");
-const grand = buildTree("service", "").cur; // shares are always of the whole bill, even when filtered
+const whole = buildTree("service", ""), grand = whole.cur; // shares are always of the whole bill, even when filtered
+const CREDITS = whole.credits; // meters with a negative total: the export's credits_and_refunds
 
 // ---------- squarified treemap layout
 function squarify(nodes, x, y, w, h) {
@@ -370,9 +371,14 @@ function render() {
 }
 
 // a total that includes credits or refunds is bigger in boxes than in the header; say by how much
-const creditNote = (n, tag) => (n.credits <= -0.005
-  ? `<${tag} class="credits" title="negative rows (credits, refunds) count in the total but can't be drawn as boxes">incl. ${money(n.credits)} credits &amp; refunds</${tag}>`
-  : "");
+// Only the service view has meters, where a negative one is a credit or refund. The other views net those into their
+// boxes, so there only the whole bill carries the note, with the same figure as the service view and the export.
+const creditNote = (n, tag) => {
+  const c = state.view === "service" ? n.credits : n.kind === "root" && !state.filter ? CREDITS : 0;
+  return c <= -0.005
+    ? `<${tag} class="credits" title="meters with a negative total (credits, refunds) count in the total but can't be drawn as boxes">incl. ${money(c)} credits &amp; refunds</${tag}>`
+    : "";
+};
 
 function renderChrome(base) {
   const v = DATA.views[state.view], [A, B] = v.dims;
@@ -481,7 +487,7 @@ function biggestDrops() {
   const t = buildTree("service", "");
   const leaves = [...t.children, ...t.gone].flatMap(g => [...g.children, ...(g.gone || [])]);
   return (_drops = leaves.map(n => ({ n, d: n.cur - n.prev }))
-    .filter(h => h.d <= -Math.max(1, t.cur * 0.005) && h.d / h.n.prev < -0.2)
+    .filter(h => h.n.cur > -0.005 && h.d <= -Math.max(1, t.cur * 0.005) && h.d / h.n.prev < -0.2) // refunds go in the credits note
     .sort((a, b) => a.d - b.d).slice(0, 3));
 }
 
@@ -562,7 +568,10 @@ $("#side").addEventListener("click", e => {
   } else if (dr) {
     const leaf = biggestDrops()[+dr.dataset.drop].n;
     reveal("service", same(leaf));
-    if (!state.sel) { state.sel = leaf; renderSide(); } // went to zero: no box to select, but its numbers still show
+    if (!state.sel) { // went to zero: no box to select, so open its service (if it still has one) and show its numbers
+      if (root.children.some(g => g.key === leaf.parent.key)) state.zoom = leaf.parent.key;
+      state.sel = leaf; render();
+    }
   } else if (r) {
     const rec = DATA.advisor[+r.dataset.rec], sub = (rec.resource.match(/^\/subscriptions\/([^/]+)$/) || [])[1];
     if (/\/resourcegroups\//.test(rec.resource)) reveal("resource", n => n.key === rec.resource);

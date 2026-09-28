@@ -30,9 +30,12 @@ OUT = HERE / "out"  # everything generated goes here (git-ignored: it contains y
 ARM = "https://management.azure.com"
 API_VERSION = "2025-03-01"  # Microsoft.CostManagement/query
 MAX_TRIES = 8  # per request, when Cost Management throttles us
-MAX_RESOURCE_PAGES = 10  # past this, the resource view drops from single resources to services
+MAX_RESOURCE_PAGES = 10  # past this, the resource view reads one total per resource and period instead of daily rows
 # What to sum, in order of preference. Some scopes reject USD columns, and older offers only know PreTaxCost.
 AGGREGATIONS = [["Cost", "CostUSD"], ["Cost"], ["PreTaxCost", "PreTaxCostUSD"], ["PreTaxCost"]]
+# A 400 about those columns names the aggregation or a column. "Cost" alone isn't enough: "Cost Management is not
+# supported for this offer" and "not registered for Microsoft.CostManagement" are not about columns.
+COLUMN_ERROR = re.compile(r"aggregation|column|costusd|pretaxcost|\bcost\b(?!\s*management)", re.I)
 
 # Each view is outer box -> inner box. A query can group by two dimensions at most, so the
 # subscription view is not queried: every query runs per subscription and call 1 feeds it too.
@@ -300,7 +303,7 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None):
                              tenant=target.get("tenant"), **kw)
             except AzureError as e:
                 # step down only when Azure objects to the cost columns; any other 400 is a real error
-                about_columns = "aggregation" in str(e).lower() or any(a.lower() in str(e).lower() for a in aggs[0])
+                about_columns = COLUMN_ERROR.search(str(e))
                 if e.status != 400 or len(aggs) == 1 or not about_columns:
                     raise
                 aggs.pop(0)
@@ -405,7 +408,7 @@ DEMO = [
                                              (P, "us east", "rg-app-prod", f"{VM}/vm-app-02", .5)]),
     ("Virtual Machines", "D8s v5", 44, 0.1, [(P, "us east", "mc_rg-aks-prod_aks-prod_eastus",
                                              "microsoft.compute/virtualmachinescalesets/aks-nodepool1-vmss", 1)]),
-    ("Virtual Machines", "E8s v5", 38, 0, [(D, "eu west", "rg-etl", f"{VM}/vm-etl-worker", 1)]),
+    ("Virtual Machines", "E8s v5", 38, -0.7, [(D, "eu west", "rg-etl", f"{VM}/vm-etl-worker", 1)]),  # scaled down: a drop
     ("Virtual Machines", "NC6s v3", 22, 0.3, [(D, "us east", "rg-ml", f"{VM}/vm-gpu-train", 1)]),
     ("Virtual Machines", "D2 v2", 9, 0, [(S, "us east", "rg-legacy", f"{VM}/vm-legacy-ftp", 1)]),
     ("Azure Kubernetes Service", "Standard Uptime SLA", 2.4, 0, [(P, "us east", "rg-aks-prod",
@@ -496,6 +499,12 @@ def demo(days, today=None):
                 acc = rows[view].setdefault(key, [0.0] * n)
                 for i, v in enumerate(daily):
                     acc[i] += v
+    # a cancelled Cosmos DB reservation refunded as one negative day: no box can show it, so the header notes it
+    rid = demo_rid(P, "rg-data-prod", "microsoft.documentdb/databaseaccounts/cosmos-catalog")
+    gkey = group_key({"scope": f"/subscriptions/{P}"}, "rg-data-prod", rid)
+    for view, key in (("service", ("Azure Cosmos DB", "Reserved 100 RU/s")), ("subscription", (P, "Azure Cosmos DB")),
+                      ("region", ("us east", "Azure Cosmos DB")), ("resource", (gkey, rid))):
+        rows[view].setdefault(key, [0.0] * n)[max(days, n - 6)] -= 150.0
     return {
         "days": dates, "split": days,
         "views": {v: {"dims": VIEWS[v], "names": names[v], "rows": pack(rows[v])} for v in VIEWS},
@@ -653,7 +662,8 @@ def summarize(data):
     growers = [x for x in line_items
                if x["change"] >= max(1, grand * 0.005) and (x["change_pct"] is None or x["change_pct"] > 20)]
     growers = sorted(growers, key=lambda x: -x["change"])[:10]
-    drops = [x for x in line_items if x["change"] <= -max(1, grand * 0.005) and (x["change_pct"] or 0) < -20]
+    drops = [x for x in line_items  # a refund (negative now) is a credit, not a saving: it goes in credits_and_refunds
+             if x["current"] > -0.01 and x["change"] <= -max(1, grand * 0.005) and (x["change_pct"] or 0) < -20]
     drops = sorted(drops, key=lambda x: x["change"])[:10]
     flags = []
     for x in line_items:
@@ -739,7 +749,7 @@ def main(argv=None):
     ap.add_argument("--no-open", action="store_true", help="don't open the browser")
     ap.add_argument("--export", nargs="?", const=str(OUT / "aztree-export.json"), metavar="FILE",
                     help="write a summary JSON for an AI agent (default out/aztree-export.json) instead of the page")
-    ap.add_argument("--verbose", action="store_true", help="print the query units each request used")
+    ap.add_argument("--verbose", action="store_true", help="print pages, rows and query units per request")
     args = ap.parse_args(argv)
 
     if not 1 <= args.days <= 180:

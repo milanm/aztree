@@ -1176,6 +1176,52 @@ class Batch1Test(unittest.TestCase):
     render = ViewerTest.render
 
 
+class Batch1ReviewTest(unittest.TestCase):
+    """Findings from the batch 1 review, each reproduced before it was fixed."""
+    render = ViewerTest.render
+    # a reservation refund in the current period, netted inside Cosmos DB in every view but the service view
+    REFUND_IN_SERVICE = [("Azure Cosmos DB", "100 RU/s", [0, 0, 0, 50, 50, 50]),
+                         ("Azure Cosmos DB", "Reserved 100 RU/s", [0, 0, 0, -100, 0, 0]),
+                         ("Storage", "LRS", [5] * 6)]
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_credits_note_is_the_same_in_every_view(self):
+        for view in ("service", "subscription", "region"):
+            with self.subTest(view=view):
+                page = ViewerTest.run_page(self, make_data(self.REFUND_IN_SERVICE), view)
+                self.assertIn("-$100 credits &amp; refunds", page["sub"])
+
+    def test_a_refund_is_not_a_drop(self):
+        rows = [("Azure Cosmos DB", "Reserved 100 RU/s", [100, 0, 0, -100, 0, 0]), ("Storage", "LRS", [5] * 6)]
+        self.assertEqual(aztree.summarize(make_data(rows))["top_drops"], [])
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_a_refund_is_not_a_drop_on_the_page(self):
+        rows = [("Azure Cosmos DB", "Reserved 100 RU/s", [100, 0, 0, -100, 0, 0]), ("Storage", "LRS", [5] * 6)]
+        self.assertNotIn("Biggest drops", ViewerTest.run_page(self, make_data(rows), "service")["side"])
+
+    def test_errors_that_only_name_cost_management_are_not_retried(self):
+        for message in ("Cost Management is not supported for subscription offer type MS-AZR-0145P",
+                        "The subscription is not registered for Microsoft.CostManagement"):
+            with self.subTest(message=message):
+                router = Router(ONE_SUB, fail={("ResourceGroupName", "ResourceId"): message})
+                with self.assertRaises(aztree.AzureError):
+                    aztree.fetch(client(router), [aztree.subscription_target(PROD)], 3, "ActualCost", advisor=False,
+                                 log=lambda *a: None, today=TODAY)
+                self.assertEqual(len([c for c in router.calls if c[1] == ("ResourceGroupName", "ResourceId")]), 1)
+
+    def test_demo_shows_drops_and_credits(self):
+        s = aztree.summarize(aztree.demo(30, today=TODAY))
+        self.assertTrue(s["top_drops"])
+        self.assertLess(s["totals"]["credits_and_refunds"], 0)
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_clicking_a_gone_drop_opens_its_service(self):
+        page = ViewerTest.run_page(self, make_data(Batch1Test.DROPPED), "service", click="[data-drop]:1")
+        self.assertIn('<span class="cur">Storage</span>', page["crumbs"])
+        self.assertIn('<div class="sel-name">Old disk</div>', page["side"])
+
+
 @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
 class ViewerEdgesTest(unittest.TestCase):
     render = ViewerTest.render
