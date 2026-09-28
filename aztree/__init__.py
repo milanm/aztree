@@ -26,8 +26,10 @@ from collections import Counter
 from importlib import resources
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-OUT = HERE / "out"  # everything generated goes here (git-ignored: it contains your subscription IDs and costs)
+def home():
+    """Where runs keep the page and the data: ~/.aztree/ (or AZTREE_HOME), never inside a repo by accident.
+    The data holds subscription IDs and costs."""
+    return Path(os.environ.get("AZTREE_HOME") or Path.home() / ".aztree")
 
 
 def template():
@@ -740,6 +742,7 @@ def main(argv=None):
     for stream in (sys.stdout, sys.stderr):  # subscription names can hold characters a Windows pipe can't encode
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="replace")
+    saved = home() / "aztree-data.json"
     ap = argparse.ArgumentParser(prog="aztree", description="See where your Azure money goes, as a treemap.")
     ap.add_argument("--version", action="version", version=f"aztree {__version__}")
     ap.add_argument("--demo", action="store_true", help="use fake data (no Azure access needed)")
@@ -752,11 +755,12 @@ def main(argv=None):
     ap.add_argument("--metric", default="ActualCost", choices=["ActualCost", "AmortizedCost"],
                     help="AmortizedCost spreads reservation and savings plan purchases over their term")
     ap.add_argument("--no-advisor", action="store_true", help="skip Azure Advisor's cost recommendations")
-    ap.add_argument("--from", dest="source", metavar="JSON", help="re-open saved data (out/aztree-data.json) without calling Azure")
-    ap.add_argument("--out", default=str(OUT / "aztree.html"), help="where to write the page (default out/aztree.html)")
+    ap.add_argument("--from", dest="source", nargs="?", const=str(saved), metavar="JSON",
+                    help="reopen saved data without calling Azure (default: the last run)")
+    ap.add_argument("--out", default=str(home() / "aztree.html"), help="where to write the page (default ~/.aztree/aztree.html)")
     ap.add_argument("--no-open", action="store_true", help="don't open the browser")
-    ap.add_argument("--export", nargs="?", const=str(OUT / "aztree-export.json"), metavar="FILE",
-                    help="write a summary JSON for an AI agent (default out/aztree-export.json) instead of the page")
+    ap.add_argument("--export", nargs="?", const=str(home() / "aztree-export.json"), metavar="FILE",
+                    help="write a summary JSON for an AI agent (default ~/.aztree/aztree-export.json) instead of the page")
     ap.add_argument("--verbose", action="store_true", help="print pages, rows and query units per request")
     args = ap.parse_args(argv)
 
@@ -764,7 +768,10 @@ def main(argv=None):
         die("--days must be between 1 and 180 (aztree reads two periods, and a query spans a year at most).")
 
     if args.source:
-        data = json.loads(Path(args.source).read_text(encoding="utf-8"))
+        source = Path(args.source)
+        if not source.exists():
+            die(f"no saved data at {source}. Run aztree once without --from first.")
+        data = json.loads(source.read_text(encoding="utf-8"))
     elif args.demo:
         data = demo(args.days)
         data.update(generated=dt.datetime.now().strftime("%Y-%m-%d %H:%M"), metric=args.metric)
@@ -779,8 +786,9 @@ def main(argv=None):
         except AzureError as e:
             die(explain(e))
         data.update(generated=dt.datetime.now().strftime("%Y-%m-%d %H:%M"), metric=args.metric)
-        OUT.mkdir(exist_ok=True)
-        (OUT / "aztree-data.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        saved.parent.mkdir(parents=True, exist_ok=True)
+        saved.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        print(f"aztree: saved the data to {saved} (reopen it with: aztree --from)")
 
     if args.export:
         path = Path(args.export).resolve()

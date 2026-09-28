@@ -1191,6 +1191,46 @@ class Batch1Test(unittest.TestCase):
     render = ViewerTest.render
 
 
+class HomeTest(unittest.TestCase):
+    """Output lives in ~/.aztree/ (or AZTREE_HOME), never next to the code."""
+
+    def setUp(self):
+        self.home = scratch_dir(self) / "Milanović" / ".aztree"  # doesn't exist yet, non-ASCII on purpose
+        patcher = mock.patch.dict(os.environ, {"AZTREE_HOME": str(self.home)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def main(self, *argv):
+        from contextlib import redirect_stdout
+        out = io.StringIO()
+        with redirect_stdout(out):
+            aztree.main(list(argv))
+        return out.getvalue()
+
+    def test_home_follows_the_environment(self):
+        self.assertEqual(aztree.home(), self.home)
+
+    def test_live_run_saves_under_home(self):
+        with mock.patch.object(aztree, "resolve_targets", lambda *a, **k: [aztree.subscription_target(PROD)]), \
+             mock.patch.object(aztree, "fetch", lambda *a, **k: json.loads(json.dumps(BASIC))):
+            printed = self.main("--no-open")
+        self.assertTrue((self.home / "aztree-data.json").exists())
+        self.assertTrue((self.home / "aztree.html").exists())
+        self.assertIn("--from", printed)
+
+    def test_from_without_a_path_reopens_the_last_run(self):
+        self.home.mkdir(parents=True)
+        (self.home / "aztree-data.json").write_text(json.dumps(BASIC), encoding="utf-8")
+        self.main("--from", "--no-open")
+        self.assertIn('"tool":"aztree"', (self.home / "aztree.html").read_text(encoding="utf-8"))
+
+    def test_from_without_saved_data_says_where_it_looked(self):
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            self.main("--from")
+        self.assertIn(str(self.home / "aztree-data.json"), err.getvalue())
+
+
 class Batch1ReviewTest(unittest.TestCase):
     """Findings from the batch 1 review, each reproduced before it was fixed."""
     render = ViewerTest.render
