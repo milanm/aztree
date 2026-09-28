@@ -641,7 +641,7 @@ class SummarizeTest(unittest.TestCase):
         s = aztree.summarize(make_data([("A", "m", [1] * 6)], advisor=[rec]))
         self.assertEqual(s["currency"], "USD")
         self.assertEqual(s["subscriptions"][0]["name"], "acme-prod")
-        self.assertEqual(s["advisor"], [rec])
+        self.assertEqual(s["advisor"], [{**rec, "covers": [], "covers_monthly": 0.0}])  # not a commitment: covers nothing
         self.assertEqual(s["tool"], "aztree")
 
     def test_instructions_speak_azure(self):
@@ -1440,6 +1440,95 @@ class DevTestTest(unittest.TestCase):
     render = ViewerTest.render
 
 
+def tip(problem, sku=None, savings=100.0, resource="/subscriptions/aaaa-1"):
+    return {"problem": problem, "solution": "", "impact": "High", "resource": resource, "resource_name": "acme-prod",
+            "resource_type": None, "sku": sku, "term": "P1Y", "annual_savings": savings, "currency": "USD",
+            "subscription": "acme-prod"}
+
+
+RESERVE_SQL = "Consider SQL PaaS DB reserved instance to save over the pay-as-you-go costs"
+RESERVE_APP = "Consider App Service reserved instance to save over the on-demand costs"
+RESERVE_COSMOS = "Consider Cosmos DB reserved instance to save over the pay-as-you-go costs"
+SAVINGS_PLAN = "Consider purchasing a savings plan to unlock lower prices"
+BILL = [("SQL Database", "vCore", [40] * 6), ("SQL Database", "eDTUs", [5] * 6),
+        ("Azure App Service", "P1 v3 App", [20] * 6), ("Azure App Service", "P0v3 App", [4] * 6),
+        ("Azure App Service", "S2 App", [5] * 6), ("Azure App Service", "B1 App", [4] * 6),
+        ("Functions", "Premium vCPU Duration", [12] * 6), ("Azure Cosmos DB", "100 RU/s", [11] * 6),
+        ("Virtual Machines", "D4s v5", [9] * 6), ("Storage", "Hot LRS Data Stored", [5] * 6)]
+
+
+class AdvisorLinkTest(unittest.TestCase):
+    def covers(self, rec):
+        (linked,) = aztree.summarize(make_data(BILL, advisor=[rec]))["advisor"]
+        return [c["meter"] for c in linked["covers"]]
+
+    def test_a_reservation_tip_names_the_meters_it_covers(self):
+        self.assertEqual(self.covers(tip(RESERVE_SQL, "SQL DB Single/Elastic Pool - General Purpose - Gen 5")), ["vCore"])
+        self.assertEqual(self.covers(tip(RESERVE_APP, "Standard_P1_v3_Windows")), ["P1 v3 App", "P0v3 App"])
+        self.assertEqual(self.covers(tip(RESERVE_COSMOS, "100 RU/s")), ["100 RU/s"])
+
+    def test_a_savings_plan_covers_what_its_sku_says(self):
+        self.assertEqual(self.covers(tip(SAVINGS_PLAN, "Compute_Savings_Plan")),
+                         ["P1 v3 App", "Premium vCPU Duration", "D4s v5", "P0v3 App"])
+        self.assertEqual(self.covers(tip(SAVINGS_PLAN, "Database_Savings_Plan")), ["vCore", "100 RU/s"])
+
+    def test_other_tips_cover_nothing(self):
+        self.assertEqual(self.covers(tip("Disable health probes when there's only one origin in an origin group", savings=None)), [])
+
+    def test_the_covered_amount_is_a_monthly_pace(self):
+        (linked,) = aztree.summarize(make_data(BILL, advisor=[tip(RESERVE_SQL)]))["advisor"]
+        self.assertEqual(linked["covers_monthly"], round(120 / 3 * 30.4, 2))
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_the_page_says_what_a_tip_covers_and_goes_there(self):
+        data = make_data(BILL, advisor=[tip(RESERVE_SQL, "SQL DB")])
+        page = ViewerTest.run_page(self, data, "service")
+        self.assertIn("covers SQL Database · vCore ($1,216/mo)", page["side"])
+        page = ViewerTest.run_page(self, data, "service", click="[data-rec]:0")
+        self.assertIn('<span class="cur">SQL Database</span>', page["crumbs"])
+        self.assertIn('<div class="sel-name">vCore</div>', page["side"])
+
+    render = ViewerTest.render
+
+
+class SteadyTest(unittest.TestCase):
+    def steady(self, data):
+        return [(h["service"], h["amount"]) for h in aztree.summarize(data)["hints"] if h["kind"] == "steady"]
+
+    def test_steady_reservable_spend_without_advisor(self):
+        found = dict(self.steady(make_data(BILL, advisor=None)))
+        self.assertEqual(found["SQL Database"], round(120 / 3 * 30.4, 2))  # vCore only: DTUs can't be reserved
+        self.assertEqual(found["Azure App Service"], round(72 / 3 * 30.4, 2))  # P1 v3 + P0v3, not S2 or B1
+        self.assertNotIn("Storage", found)
+
+    def test_hidden_when_advisor_has_commitment_tips(self):
+        self.assertEqual(self.steady(make_data(BILL, advisor=[tip(SAVINGS_PLAN, "Compute_Savings_Plan")])), [])
+
+    def test_shown_when_advisor_failed(self):
+        self.assertTrue(self.steady(make_data(BILL, advisor=[], advisor_error="HTTP 403")))
+
+    def test_spend_that_moves_is_not_steady(self):
+        rows = [("SQL Database", "vCore", [40, 40, 40, 20, 60, 30])]
+        self.assertEqual(self.steady(make_data(rows, advisor=None)), [])
+
+    def test_small_spend_is_not_worth_committing(self):
+        self.assertEqual(self.steady(make_data([("SQL Database", "vCore", [3] * 6)], advisor=None)), [])  # ~$91/mo
+
+    def test_amortized_cost_hides_it(self):
+        # reserved usage already looks flat under AmortizedCost; Advisor knows what's reserved, this can't
+        self.assertEqual(self.steady(make_data(BILL, advisor=None, metric="AmortizedCost")), [])
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_the_page_shows_it_and_opens_the_service(self):
+        data = make_data([("SQL Database", "vCore", [40] * 6)], advisor=None)
+        page = ViewerTest.run_page(self, data, "service")
+        self.assertIn("steady", page["side"])
+        page = ViewerTest.run_page(self, data, "service", click="[data-hint]:0")
+        self.assertIn('<div class="sel-name">SQL Database</div>', page["side"])
+
+    render = ViewerTest.render
+
+
 @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
 class ShowAllTest(unittest.TestCase):
     render = ViewerTest.render
@@ -1455,10 +1544,12 @@ class ShowAllTest(unittest.TestCase):
             for i in range(8)]
 
     def test_worth_a_look_shows_six_then_all(self):
-        page = self.run_page(make_data(self.PITS9), "service")
+        # with an Advisor commitment tip there's no steady-spend hint, so the nine pits are the whole list
+        data = make_data(self.PITS9, advisor=[tip(SAVINGS_PLAN, "Database_Savings_Plan")])
+        page = self.run_page(data, "service")
         self.assertEqual(page["side"].count('data-hint="'), 6)
         self.assertIn("show all 9", page["side"])
-        page = self.run_page(make_data(self.PITS9), "service", click="[data-more]:hints")
+        page = self.run_page(data, "service", click="[data-more]:hints")
         self.assertEqual(page["side"].count('data-hint="'), 9)
         self.assertIn("show fewer", page["side"])
 

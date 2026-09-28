@@ -466,8 +466,14 @@ const SHOWN_RECS = 5, SHOWN_HINTS = 6;
 // a long list opens in place: "show all N" / "show fewer"
 const showAll = (list, n, cap) => (n > cap
   ? `<div class="showall" data-more="${list}">${state.expanded[list] ? "show fewer" : `show all ${n}`}</div>` : "");
+// the export's copy of Advisor's tips knows which meters a reservation or savings plan would cover
+const TIPS = DATA.export?.advisor ?? DATA.advisor;
+// "covers SQL Database · vCore ($1,216/mo) + 1 more", or who/what the tip is about
+const tipLine = r => (r.covers?.length
+  ? `covers ${shortSvc(r.covers[0].service)} · ${r.covers[0].meter} (${money(r.covers_monthly)}/mo)${r.covers.length > 1 ? ` + ${r.covers.length - 1} more` : ""}`
+  : [r.resource_name, r.sku, Object.hasOwn(TERM, r.term) && TERM[r.term]].filter(Boolean).join(" · "));
 function advisorPanel() {
-  const recs = DATA.advisor;
+  const recs = TIPS;
   if (!recs) return "";
   if (!recs.length) {
     const err = DATA.advisor_error;
@@ -481,7 +487,7 @@ function advisorPanel() {
     top.map((r, i) => `<div class="hint" data-rec="${i}" style="--c:var(--advisor)">
       <div class="hn" title="${esc(r.solution || r.problem)}">${esc(r.problem)}</div>
       <div class="hv">${r.annual_savings ? money(r.annual_savings, sym(r.currency || DATA.currency)) + "/yr" : "–"}</div>
-      <div class="hs" title="${esc(r.resource || "")}">${esc([r.resource_name, r.sku, Object.hasOwn(TERM, r.term) && TERM[r.term]].filter(Boolean).join(" · "))}</div>
+      <div class="hs" title="${esc([r.resource_name, r.sku, Object.hasOwn(TERM, r.term) && TERM[r.term]].filter(Boolean).join(" · "))}">${esc(tipLine(r))}</div>
       <div class="hb"><i style="width:${((r.annual_savings || 0) / max) * 100}%"></i></div></div>`).join("") +
     showAll("recs", recs.length, SHOWN_RECS) + `</section>`;
 }
@@ -498,7 +504,7 @@ function biggestDrops() {
 }
 
 // ---------- worth a look: the hints aztree.py computed (the export's `hints`, in order), placed on the service view
-const HINT_COLOR = { grower: "var(--up)", spike: "var(--up)", pit: "var(--accent)", devtest: "var(--accent)" };
+const HINT_COLOR = { grower: "var(--up)", spike: "var(--up)", pit: "var(--accent)", devtest: "var(--accent)", steady: "var(--advisor)" };
 let _hints;
 function worthALook() {
   if (_hints) return _hints;
@@ -512,6 +518,10 @@ function worthALook() {
       const n = groups.get(h.group);
       return n && { h, n, c, why, title: n.name, value: h.amount, view: "resource", find: m => m.kind === "group" && m.key === h.group };
     }
+    if (h.kind === "steady") {
+      const n = t.children.find(g => g.key === h.service);
+      return n && { h, n, c, why, title: n.name, value: h.current, view: "service", find: m => m.kind === "group" && m.key === h.service };
+    }
     const n = leaves.get(`${h.service}\u0000${h.meter}`);
     return n && { h, n, c, why, title: `${shortSvc(n.parent.key)} · ${n.name}`, value: n.cur, view: "service",
       find: m => m.kind === "leaf" && m.key === n.key && m.parent.key === n.parent.key };
@@ -522,6 +532,7 @@ function hintText(h) {
   if (h.kind === "devtest") return `${h.resources} always-on ${h.resources === 1 ? "resource bills" : "resources bill"} all 168 hours a week in this dev/test group; scale down or stop outside working hours, or go serverless`;
   if (h.kind === "grower") return h.previous < 0.01 ? "new this period" : `up ${pct(h.change / h.previous)} (+${money(h.change)}) vs previous ${DAYS}d`;
   if (h.kind === "spike") return `spiked on ${day(h.date)}: ${money(h.day)} vs a usual ${money(h.usual)}/day`;
+  if (h.kind === "steady") return `steady at about ${money(h.amount)}/mo on ${h.meters.join(", ")}: a reservation or savings plan could cut it`;
   return h.reason || "";
 }
 
@@ -588,8 +599,9 @@ $("#side").addEventListener("click", e => {
       state.sel = leaf; render();
     }
   } else if (r) {
-    const rec = DATA.advisor[+r.dataset.rec], sub = (rec.resource.match(/^\/subscriptions\/([^/]+)$/) || [])[1];
-    if (/\/resourcegroups\//.test(rec.resource)) reveal("resource", n => n.key === rec.resource);
+    const rec = TIPS[+r.dataset.rec], sub = (rec.resource.match(/^\/subscriptions\/([^/]+)$/) || [])[1], top = rec.covers?.[0];
+    if (top) reveal("service", n => n.kind === "leaf" && n.key === top.meter && n.parent.key === top.service); // the biggest meter it covers
+    else if (/\/resourcegroups\//.test(rec.resource)) reveal("resource", n => n.key === rec.resource);
     else if (sub) reveal("subscription", n => n.kind === "group" && n.key.toLowerCase() === sub);  // reservations, savings plans
   }
 });

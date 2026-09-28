@@ -700,6 +700,65 @@ def always_on(data, floor):
             for k, g in groups.items() if g["current"] >= floor]
 
 
+# Meters a reservation or savings plan can cover, by kind: (service pattern, meter pattern). Advisor names a
+# reservation in its wording ("Consider SQL PaaS DB reserved instance ...") and a savings plan only by its SKU.
+RESERVABLE = {
+    "sql": (r"^SQL (?:Database|Managed Instance)$", r"vCore"),
+    "app": (r"^Azure App Service$", r"^(?:P\d+ ?m?v3|I\d+ ?v2) App"),
+    "functions": (r"^Functions$", r"^Premium"),
+    "cosmos": (r"^Azure Cosmos DB$", r"RU/s"),
+    "vm": (r"^Virtual Machines$", r""),
+    "redis": (r"^(?:Redis Cache|Azure Cache for Redis)$", r"^P\d|Enterprise"),
+    "postgres": (r"^Azure Database for PostgreSQL", r"vCore"),
+    "mysql": (r"^Azure Database for MySQL", r"vCore"),
+}
+RESERVATION_WORDS = [("SQL", "sql"), ("App Service", "app"), ("Cosmos", "cosmos"), ("virtual machine", "vm"),
+                     ("Redis", "redis"), ("PostgreSQL", "postgres"), ("MySQL", "mysql")]
+SAVINGS_PLANS = {"Compute_Savings_Plan": ["vm", "app", "functions"], "Database_Savings_Plan": ["sql", "cosmos", "postgres", "mysql"]}
+
+
+def commitment_kinds(rec):
+    """What an Advisor tip would commit to: from its wording for a reservation, from its SKU for a savings plan."""
+    problem = rec.get("problem") or ""
+    m = re.match(r"Consider (.+?) reserved (?:instance|capacity)", problem, re.I)
+    if m:
+        return [kind for word, kind in RESERVATION_WORDS if word.lower() in m.group(1).lower()]
+    if "savings plan" in problem.lower():
+        return SAVINGS_PLANS.get(rec.get("sku") or "", [])
+    return []
+
+
+def reservable(service, meter, kinds=tuple(RESERVABLE)):
+    return any(re.search(RESERVABLE[k][0], service) and re.search(RESERVABLE[k][1], meter) for k in kinds)
+
+
+def link_tip(rec, line_items, n):
+    """An Advisor tip plus the meters its reservation or savings plan would cover (biggest first) and their monthly
+    pace. Other tips cover nothing."""
+    kinds = commitment_kinds(rec)
+    covers = [{"service": x["service"], "meter": x["meter"], "current": x["current"]} for x in line_items
+              if kinds and x["current"] > 0 and reservable(x["service"], x["meter"], kinds)]
+    return {**rec, "covers": covers, "covers_monthly": round(sum(c["current"] for c in covers) / n * 30.4, 2)}
+
+
+def steady(data, line_keys, n):
+    """Reservable spend that barely moves (no zero day, day-to-day spread within 10%) and runs at least $100 a
+    month, one hint per service. Only asked for when Advisor, which knows what's already reserved, isn't there."""
+    split, by_service = data["split"], {}
+    for r in data["views"]["service"]["rows"]:
+        svc, meter = r["k"]
+        cur = r["d"][split:]
+        if (svc, meter) not in line_keys or not reservable(svc, meter) or min(cur) <= 0:
+            continue
+        if statistics.pstdev(cur) <= 0.10 * statistics.mean(cur):
+            s = by_service.setdefault(svc, {"current": 0.0, "meters": []})
+            s["current"] += sum(cur)
+            s["meters"].append(meter)
+    return [{"kind": "steady", "service": svc, "meters": s["meters"], "current": round(s["current"], 2),
+             "amount": round(s["current"] / n * 30.4, 2)}
+            for svc, s in by_service.items() if s["current"] / n * 30.4 >= 100]
+
+
 def summarize(data):
     """Turn the raw daily data into a compact JSON an AI agent can reason about."""
     days, split = data["days"], data["split"]
@@ -786,6 +845,13 @@ def summarize(data):
         if s and tuple(r["k"]) in items:
             spiked[tuple(r["k"])] = hint("spike", items[tuple(r["k"])], s["excess"], date=days[s["day"]],
                                          day=money(r["d"][s["day"]]), usual=money(s["usual"]))
+    advisor = data.get("advisor")
+    if advisor is not None:
+        advisor = [link_tip(rec, line_items, n) for rec in advisor]
+    # steady spend is Advisor's job when it's there: it prices the saving and knows what's already reserved
+    advisor_has_commitments = bool(advisor) and not data.get("advisor_error") and any(commitment_kinds(r) for r in advisor)
+    if not advisor_has_commitments and data.get("metric") != "AmortizedCost":  # amortized, reserved usage looks flat too
+        todos += steady(data, {(x["service"], x["meter"]) for x in line_items}, n)
     todos = sorted(todos + always_on(data, max(10, grand * 0.002)), key=lambda h: -h["amount"])
     flagged = {(f["service"], f["meter"]) for f in flags}
     news = sorted([*spiked.values(), *(hint("grower", x, x["change"]) for x in growing
@@ -821,7 +887,7 @@ def summarize(data):
         "top_drops": drops,
         "flags": flags,
         "hints": hints,
-        "advisor": data.get("advisor"),
+        "advisor": advisor,
         "advisor_error": data.get("advisor_error"),
         "line_items": line_items,
         "daily_totals": [{"date": d, "cost": money(v)} for d, v in zip(days, daily)],
