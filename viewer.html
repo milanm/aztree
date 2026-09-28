@@ -60,7 +60,8 @@ label.chk input { accent-color: var(--accent); margin: 0; }
 .gh .v { color: var(--muted); font-size: 10.5px; }
 .leaf .n { color: #e3e6ec; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .leaf .v { color: color-mix(in srgb, var(--c) 45%, #9aa1ad); font-size: 10.5px; white-space: nowrap; }
-.cell.sel { outline: 2px solid #f1f3f7; outline-offset: -2px; z-index: 2; }
+.cell.sel { outline: 2px solid #f1f3f7; outline-offset: -2px; }
+.leaf.sel { z-index: 2; } /* not groups: their boxes are siblings on top, and a raised group would cover them */
 .empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 14px; }
 
 aside { grid-column: 2; grid-row: 2 / 4; border-left: 1px solid var(--line); background: var(--panel);
@@ -324,7 +325,8 @@ function drawGroup(frag, r) {
     el.innerHTML = `<div class="gh"><span class="n">${esc(r.n.name)}</span></div>`;
   }
 }
-function zoomed() { return state.zoom && root.children.find(g => g.key === state.zoom); }
+// zoom holds a group key or null; "" is a real key (the no-region group), so never test it for truthiness
+function zoomed() { return state.zoom === null ? undefined : root.children.find(g => g.key === state.zoom); }
 
 function render() {
   const base = zoomed() || root;
@@ -469,7 +471,7 @@ function open(n) {
   if (g?.kind === "group") { state.zoom = g.key; render(); }
 }
 function up() {
-  if (state.zoom) { const g = zoomed(); state.zoom = null; state.sel = g || null; render(); }
+  if (state.zoom !== null) { const g = zoomed(); state.zoom = null; state.sel = g || null; render(); }
   else if (state.sel) select(null);
 }
 function clearFilter() { state.filter = ""; $("#filter").value = ""; }
@@ -492,7 +494,7 @@ $("#crumbs").addEventListener("click", e => { if (e.target.closest("[data-up]"))
 $("#filter").addEventListener("input", e => {
   state.filter = e.target.value.trim(); state.sel = null;
   root = buildTree(state.view, state.filter);
-  if (state.zoom && !zoomed()) state.zoom = null;
+  if (state.zoom !== null && !zoomed()) state.zoom = null;
   render();
 });
 $("#side").addEventListener("click", e => {

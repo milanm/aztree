@@ -626,7 +626,10 @@ Object.assign(globalThis, {
   innerWidth: 1400, innerHeight: 900,
 });
 vm.runInThisContext(code);
-if (click) {  // "[data-rec]:0" clicks the first Advisor tip in the side panel
+if (click && typeof click === "object") {  // {"map": "dblclick", "key": ""} double-clicks that group's box
+  const box = made.find(e => e.className === "cell group" && e._n.key === click.key);
+  for (const fn of byId["#map"].on[click.map] || []) fn({ target: { closest: () => box } });
+} else if (click) {  // "[data-rec]:0" clicks the first Advisor tip in the side panel
   const [sel, value] = click.split(":");
   const target = { closest: s => (s === sel ? { dataset: { [sel.slice(6, -1)]: value } } : null) };
   for (const fn of byId["#side"].on.click || []) fn({ target });
@@ -978,6 +981,21 @@ class SecondReviewTest(unittest.TestCase):
         self.assertIn(("Azure Cosmos DB", "Reserved 100 RU/s"), rows_of(data, "service"))
         totals = aztree.summarize(data)["totals"]
         self.assertEqual((totals["previous"], totals["current"]), (100.0, -95.0))
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_the_no_region_group_opens(self):
+        data = make_data([("Storage", "LRS", [1] * 6)])
+        data["views"]["region"]["rows"][0]["k"][0] = ""  # Azure leaves ResourceLocation empty for some charges
+        page = ViewerTest.run_page(self, data, "region", click={"map": "dblclick", "key": ""})
+        self.assertIn('<span class="cur">(no region)</span>', page["crumbs"])
+
+    def test_a_selected_group_stays_under_its_boxes(self):
+        # groups and their leaves are siblings; lifting a selected group would cover its leaves
+        for rule in aztree.re.findall(r"([^{}]*\.sel[^{}]*)\{([^}]*)\}", TEMPLATE):
+            if "z-index" in rule[1]:
+                self.assertIn(".leaf.sel", rule[0])
+
+    render = ViewerTest.render
 
 
 class ExplainTest(unittest.TestCase):
