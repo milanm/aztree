@@ -527,16 +527,26 @@ def demo(days, today=None):
 
 # Known money pits: (service pattern, meter pattern, why). First match wins. Shared with the viewer's
 # "worth a look" panel, so the patterns must mean the same in Python and JavaScript.
-OLD_VM_SIZES = r"^(?:(?:Basic[ ._])?A\d+m?(?: v2)?|DS?\d+(?: v2)?|F\d+s?)(?:$|/| Low Priority| Spot)"
+OLD_VM_SIZES = r"^(?:(?:Basic[ ._])?A\d+m?(?: v2)?|DS?\d+(?: v2)?|F\d+s?|NV\d+|GS?\d+|L\d+s)(?:$|/| Low Priority| Spot| Promo)"
 PITS = [
-    (r"^(?:Log Analytics|Azure Monitor)$", r"Data Ingestion",
+    (r"^(?:Log Analytics|Azure Monitor)$", r"^(?!Basic ).*Data Ingestion",
      "Log Analytics ingestion — trim noisy tables, use Basic logs, or a commitment tier past 100 GB/day"),
+    (r"^Azure Front Door Service$", r"^Premium Base Fees",
+     "Front Door Premium — Standard is about $35 a month against about $330; Premium is only needed for managed "
+     "WAF rules or Private Link origins"),
+    (r"^SQL Database$", r"DTUs?$", "DTU databases — vCore can be reserved and use Azure Hybrid Benefit; serverless pauses when idle"),
+    (r"^Azure DevOps$", r"Concurrent Job|Basic User",
+     "Azure DevOps seats and hosted jobs — the first 5 Basic users are free; remove inactive users, check pipeline concurrency"),
+    (r"^Virtual Network$", r"Private Endpoint", "private endpoints — $0.01 an hour each plus data; remove the ones nothing uses"),
+    (r"^Azure Cosmos DB$", r"^100 RU/s$", "provisioned Cosmos DB throughput — autoscale or serverless costs less when load varies"),
+    (r"^Azure Monitor$", r"at 1 Minute Frequency", "1-minute alert rules — they cost more than 5- or 15-minute ones; relax the ones "
+     "where minutes don't matter"),
     (r"^Bandwidth$", r"Data Transfer Out", "data transfer out — keep traffic in one region, cache at the edge"),
     (r"^NAT Gateway$", r"Data Processed", "NAT data processing — service or private endpoints for Storage, SQL and ACR skip it"),
     (r"^Azure Firewall$", r"Data Processed|Premium", "Azure Firewall — processing and Premium add up; route only what needs inspection"),
     (r"^Virtual Network$", r"^Basic .*Public IP", "Basic public IPs — the Basic SKU retired on 30 Sep 2025, move to Standard"),
     (r"^Virtual Network$", r"Public IP|IP Address Hours", "public IPs — billed per hour each; release the ones nothing uses"),
-    (r"^Storage$", r"Snapshot", "disk snapshots — prune old ones; incremental snapshots on Standard storage cost less"),
+    (r"^Storage$", r"Snapshot", "snapshots — prune old ones; incremental snapshots on Standard storage cost less"),
     (r"^Virtual Machines$", OLD_VM_SIZES, "previous-gen VM sizes — current generations cost less for the same work"),
     (r"^Azure App Service$", r"^P\d+ ?v2 App", "Premium v2 App Service plans — Premium v3 gives more per dollar and can be reserved"),
     (r"", r"Extended Security Update", "Extended Security Updates — upgrade the OS or SQL version to stop paying for them"),
