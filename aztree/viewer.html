@@ -142,7 +142,7 @@ kbd { font: 10.5px ui-monospace, Menlo, monospace; color: var(--muted); border: 
   <div id="map"></div>
   <aside id="side"></aside>
   <footer>
-    <span><kbd>click</kbd>select</span><span><kbd>dbl-click</kbd><kbd>enter</kbd>open</span><span><kbd>⌫</kbd>up</span>
+    <span><kbd>click</kbd>select</span><span><kbd>click</kbd>again or <kbd>enter</kbd>open</span><span><kbd>tab</kbd>next</span><span><kbd>⌫</kbd>up</span>
     <span id="viewkeys"></span><span><kbd>c</kbd>color</span><span><kbd>/</kbd>filter</span><span><kbd>e</kbd>export</span><span><kbd>esc</kbd>clear</span>
     <span class="spacer"></span><span id="meta"></span>
   </footer>
@@ -625,7 +625,15 @@ function select(n) {
 }
 function open(n) {
   const g = n?.kind === "leaf" ? n.parent : n;
-  if (g?.kind === "group") { state.zoom = g.key; render(); }
+  if (g?.kind !== "group" || state.zoom === g.key) return; // already inside: a second click is not a second zoom
+  state.zoom = g.key; render();
+}
+// Tab walks the drawn boxes by size among the selection's siblings (disktree: scanning for space is this walk)
+function step(dir) {
+  const parent = state.sel?.parent ?? (zoomed() || root), peers = drawn.filter(n => n.parent === parent);
+  if (!peers.length) return;
+  const i = peers.indexOf(state.sel);
+  select(peers[i < 0 ? 0 : Math.max(0, Math.min(peers.length - 1, i + dir))]);
 }
 function up() {
   if (state.zoom !== null) { const g = zoomed(); state.zoom = null; state.sel = g || null; render(); }
@@ -649,8 +657,8 @@ $("#views").innerHTML = VIEW_KEYS.filter(v => DATA.views[v])
   .map(v => `<button data-v="${v}">${esc(VIEW_NAMES[v] || TAG)}</button>`).join("");
 $("#viewkeys").innerHTML = VIEW_KEYS.map((v, i) => (DATA.views[v] ? `<kbd>${i + 1}</kbd>` : "")).join("") + "view";
 
-map.addEventListener("click", e => { const c = e.target.closest(".cell"); select(c ? c._n : null); });
-map.addEventListener("dblclick", e => { const c = e.target.closest(".cell"); if (c) open(c._n); });
+// click selects; clicking the selected box again opens it (a double click is two clicks)
+map.addEventListener("click", e => { const c = e.target.closest(".cell"), n = c ? c._n : null; n && n === state.sel ? open(n) : select(n); });
 $("#views").addEventListener("click", e => e.target.dataset.v && setView(e.target.dataset.v));
 $("#change").addEventListener("change", e => { state.change = e.target.checked; render(); });
 $("#crumbs").addEventListener("click", e => { if (e.target.closest("[data-up]")) up(); });
@@ -680,8 +688,9 @@ $("#side").addEventListener("click", e => {
 });
 document.addEventListener("keydown", e => {
   const typing = e.target === $("#filter");
-  if (e.key === "Escape") {
+  if (e.key === "Escape") { // one thing at a time: the filter, then the selection, then up a level
     if (typing || state.filter) { clearFilter(); $("#filter").blur(); rebuild(); render(); }
+    else if (state.sel && state.sel !== zoomed()) select(null);
     else up();
     return;
   }
@@ -690,8 +699,12 @@ document.addEventListener("keydown", e => {
     return;
   }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
-  if (e.key === "/") { e.preventDefault(); $("#filter").focus(); }
-  else if (e.key === "Enter") open(state.sel);
+  if (e.key === "Tab") { // only when no control has focus, so the header stays reachable by keyboard
+    if (e.target !== document.body) return;
+    e.preventDefault(); step(e.shiftKey ? -1 : 1);
+  }
+  else if (e.key === "/") { e.preventDefault(); $("#filter").focus(); }
+  else if (e.key === "Enter") state.sel ? open(state.sel) : step(1);
   else if (e.key === "Backspace") { e.preventDefault(); up(); }
   else if (e.key === "e" && DATA.export) exportJSON();
   else if (e.key === "c" || e.key === "t") { state.change = !state.change; render(); }

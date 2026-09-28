@@ -2256,6 +2256,44 @@ class FilterDimTest(unittest.TestCase):
         self.assertIn('<div class="sel-name">vCore</div>', page["side"])
 
 
+@unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+class NavKeysTest(unittest.TestCase):
+    render = ViewerTest.render
+    run_page = ViewerTest.run_page
+    DATA = FilterDimTest.DATA
+
+    def sel(self, page):
+        return aztree.re.search(r'<div class="sel-name">([^<]*)</div>', page["side"]).group(1)
+
+    def test_clicking_the_selected_box_opens_it(self):
+        page = self.run_page(make_data(self.DATA), "service", click=[{"map": "click", "name": "Storage"}] * 2)
+        self.assertIn('<span class="cur">Storage</span>', page["crumbs"])
+
+    def test_no_double_click_listener_opens_twice(self):
+        self.assertNotIn('addEventListener("dblclick"', TEMPLATE)
+
+    def test_tab_walks_by_size_and_shift_tab_back(self):
+        page = self.run_page(make_data(self.DATA), "service", click=[{"press": "Tab"}])
+        self.assertEqual(self.sel(page), "SQL Database")  # the largest box
+        page = self.run_page(make_data(self.DATA), "service", click=[{"press": "Tab"}] * 2)
+        self.assertEqual(self.sel(page), "Storage")
+        page = self.run_page(make_data(self.DATA), "service", click=[{"press": "Tab"}] * 2 + [{"press": "Tab", "shift": True}])
+        self.assertEqual(self.sel(page), "SQL Database")
+        page = self.run_page(make_data(self.DATA), "service", click=[{"map": "click", "name": "Hot LRS Data Stored"}, {"press": "Tab"}])
+        self.assertEqual(self.sel(page), "LRS Snapshots")  # among its siblings
+
+    def test_enter_with_nothing_selected_picks_the_largest(self):
+        self.assertEqual(self.sel(self.run_page(make_data(self.DATA), "service", click={"press": "Enter"})), "SQL Database")
+
+    def test_escape_clears_the_selection_then_goes_up(self):
+        opened = [{"map": "click", "name": "Storage"}] * 2 + [{"map": "click", "name": "LRS Snapshots"}]
+        page = self.run_page(make_data(self.DATA), "service", click=opened + [{"press": "Escape"}])
+        self.assertIn('<span class="cur">Storage</span>', page["crumbs"])  # still inside
+        self.assertIn('<div class="sel-name">Storage</div>', page["side"])  # the zoomed group, not the leaf
+        page = self.run_page(make_data(self.DATA), "service", click=opened + [{"press": "Escape"}] * 2)
+        self.assertIn("all services", page["crumbs"])
+
+
 class ExplainTest(unittest.TestCase):
     def test_bad_response_is_not_blamed_on_the_network(self):
         send = FakeSend(page(["UsageDate", "ServiceName", "Meter"], [[20260925, "Storage", "LRS"]]))
