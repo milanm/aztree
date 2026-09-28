@@ -496,12 +496,15 @@ def demo(days, today=None):
     names["subscription"] = dict(DEMO_SUBS)
     for service, meter, per_day, growth, spots in DEMO:
         bursty = any(w in meter for w in ("Tokens", "Data Transfer", "Ingestion", "Operations", "Processed", "Duration"))
+        # plans, provisioned databases, nodes and gateways bill a fixed hourly price: the same every day, like real bills
+        fixed = re.search(r"App$|vCore|Instance|Node$|Uptime SLA|Unit$|Gateway$|Endpoint$|Public IP$|Base Fees|Disk$", meter)
         for sub, region, rg, path, share in spots:
             daily = []
             for i in range(n):
                 m = (1 + growth * i / (n - 1)) / (1 + growth / 2)  # keep the average near per_day
                 m *= 0.8 if bursty and weekend[i] else 1
-                daily.append(max(0.0, per_day * share * m * rnd.gauss(1, 0.06)))
+                noise = rnd.gauss(1, 0.06)  # drawn either way, so the other meters' numbers don't move
+                daily.append(max(0.0, per_day * share * m * (1 if fixed else noise)))
             rid = demo_rid(sub, rg, path)
             gkey = group_key({"scope": f"/subscriptions/{sub}"}, rg, rid)
             names["resource"][gkey] = f"{rg or '(no resource group)'} · {DEMO_SUBS[sub]}"
@@ -634,7 +637,8 @@ AI_INSTRUCTIONS = (
     "always-on compute in dev/test groups, steady spend worth committing). `advisor` holds "
     "Azure Advisor's cost recommendations, one per kind, resource and SKU, with the largest annual saving Advisor "
     "reported; recommendations that cover the same usage (a reservation and a savings plan, a 1-year and a 3-year term) "
-    "are alternatives, not additive. A tip's `covers` lists the meters its reservation or savings plan would cover. "
+    "are alternatives, not additive. A tip's `covers` lists the meters its reservation or savings plan would cover, "
+    "matched across the whole bill, so in a multi-subscription export it can include other subscriptions' usage. "
     "Please: 1) explain what drives the cost, 2) explain notable changes vs the previous period, "
     "3) suggest concrete savings, each with an estimated monthly saving and how to verify it. "
     "Levers to consider: reservations and savings plans for steady compute and databases; Azure Hybrid Benefit for "
@@ -670,7 +674,9 @@ def spike(daily, split, floor):
 
 
 # Dev/test by name: a whole word (tms-dev-rg, acme-staging), not a substring (devices, contest).
-DEV_TEST = re.compile(r"(?:^|[-_ .])(?:dev|tst|test|stg|staging|stage|qa|uat|sbx|sandbox|nonprod|preprod)(?:[-_ .0-9]|$)", re.I)
+DEV_TEST = re.compile(r"(?:^|[-_ .])(?:dev|devtest|development|tst|test|testing|stg|staging|stage|qa|uat|sbx|sandbox"
+                      r"|non-?prod|pre-?prod)(?:[-_ .0-9]|$)", re.I)
+MIN_PATTERN_DAYS = 7  # "flat" or "steady" means little over fewer days than a week
 # Compute that bills by the hour whether used or not, and can be scaled down, stopped or made serverless.
 ALWAYS_ON = re.compile(r"/providers/microsoft\.(?:compute/(?:virtualmachines|virtualmachinescalesets)|web/serverfarms"
                        r"|sql/servers/[^/]+/(?:databases|elasticpools)|documentdb/databaseaccounts"
@@ -680,7 +686,7 @@ ALWAYS_ON = re.compile(r"/providers/microsoft\.(?:compute/(?:virtualmachines|vir
 def always_on(data, floor):
     """Dev/test resource groups whose compute runs flat all period (lowest day at least 90% of the highest):
     one hint per group. Needs daily data, so nothing when the resource view has period totals only."""
-    if data.get("resource_fallback"):
+    if data.get("resource_fallback") or len(data["days"]) - data["split"] < MIN_PATTERN_DAYS:
         return []
     view, split = data["views"]["resource"], data["split"]
     subs = {s["id"].lower(): s["name"] for s in data.get("subscriptions", [])}
@@ -709,13 +715,14 @@ RESERVABLE = {
     "app": (r"^Azure App Service$", r"^(?:P\d+ ?m?v3|I\d+ ?v2) App"),
     "functions": (r"^Functions$", r"^Premium"),
     "cosmos": (r"^Azure Cosmos DB$", r"RU/s"),
-    "vm": (r"^Virtual Machines$", r""),
+    "vm": (r"^Virtual Machines$", r"^(?!.* (?:Spot|Low Priority)$)"),  # Spot capacity can't be reserved
     "redis": (r"^(?:Redis Cache|Azure Cache for Redis)$", r"^P\d|Enterprise"),
     "postgres": (r"^Azure Database for PostgreSQL", r"vCore"),
     "mysql": (r"^Azure Database for MySQL", r"vCore"),
 }
-RESERVATION_WORDS = [("SQL", "sql"), ("App Service", "app"), ("Cosmos", "cosmos"), ("virtual machine", "vm"),
-                     ("Redis", "redis"), ("PostgreSQL", "postgres"), ("MySQL", "mysql")]
+# "SQL" alone would also catch "Azure Synapse Analytics (formerly SQL DW)", which covers no SQL Database meter
+RESERVATION_WORDS = [(r"SQL (?:PaaS DB|Database|Managed Instance)", "sql"), (r"App Service", "app"), (r"Cosmos", "cosmos"),
+                     (r"virtual machine", "vm"), (r"Redis", "redis"), (r"PostgreSQL", "postgres"), (r"MySQL", "mysql")]
 SAVINGS_PLANS = {"Compute_Savings_Plan": ["vm", "app", "functions"], "Database_Savings_Plan": ["sql", "cosmos", "postgres", "mysql"]}
 
 
@@ -724,7 +731,7 @@ def commitment_kinds(rec):
     problem = rec.get("problem") or ""
     m = re.match(r"Consider (.+?) reserved (?:instance|capacity)", problem, re.I)
     if m:
-        return [kind for word, kind in RESERVATION_WORDS if word.lower() in m.group(1).lower()]
+        return [kind for words, kind in RESERVATION_WORDS if re.search(words, m.group(1), re.I)]
     if "savings plan" in problem.lower():
         return SAVINGS_PLANS.get(rec.get("sku") or "", [])
     return []
@@ -745,8 +752,11 @@ def link_tip(rec, line_items, n):
 
 def steady(data, line_keys, n):
     """Reservable spend that barely moves (no zero day, day-to-day spread within 10%) and runs at least $100 a
-    month, one hint per service. Only asked for when Advisor, which knows what's already reserved, isn't there."""
+    month, one hint per service. Only asked for when Advisor, which knows what's already reserved, isn't there.
+    `amount` is the period's dollars, like every other to-do, so they sort together; `monthly` is for the text."""
     split, by_service = data["split"], {}
+    if n < MIN_PATTERN_DAYS:
+        return []
     for r in data["views"]["service"]["rows"]:
         svc, meter = r["k"]
         cur = r["d"][split:]
@@ -757,7 +767,7 @@ def steady(data, line_keys, n):
             s["current"] += sum(cur)
             s["meters"].append(meter)
     return [{"kind": "steady", "service": svc, "meters": s["meters"], "current": round(s["current"], 2),
-             "amount": round(s["current"] / n * 30.4, 2)}
+             "amount": round(s["current"], 2), "monthly": round(s["current"] / n * 30.4, 2)}
             for svc, s in by_service.items() if s["current"] / n * 30.4 >= 100]
 
 
@@ -844,7 +854,7 @@ def summarize(data):
     spiked = {}
     for r in data["views"]["service"]["rows"]:
         s = spike(r["d"], split, floor=max(10, grand * 0.0025))
-        if s and tuple(r["k"]) in items:
+        if s and tuple(r["k"]) in items and items[tuple(r["k"])]["current"] > 0:  # a charge refunded in full is no news
             spiked[tuple(r["k"])] = hint("spike", items[tuple(r["k"])], s["excess"], date=days[s["day"]],
                                          day=money(r["d"][s["day"]]), usual=money(s["usual"]))
     advisor = data.get("advisor")

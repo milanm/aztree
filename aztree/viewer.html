@@ -530,10 +530,10 @@ function worthALook() {
   return (_hints = (DATA.export?.hints || []).map(place).filter(Boolean)); // the panel shows the first few; "show all" opens the rest
 }
 function hintText(h) {
-  if (h.kind === "devtest") return `${h.resources} always-on ${h.resources === 1 ? "resource bills" : "resources bill"} all 168 hours a week in this dev/test group; scale down or stop outside working hours, or go serverless`;
+  if (h.kind === "devtest") return `${h.resources} always-on ${h.resources === 1 ? "resource" : "resources"} in this dev/test group billed every day of the period; scale down or stop outside working hours, or go serverless`;
   if (h.kind === "grower") return h.previous < 0.01 ? "new this period" : `up ${pct(h.change / h.previous)} (+${money(h.change)}) vs previous ${DAYS}d`;
   if (h.kind === "spike") return `spiked on ${day(h.date)}: ${money(h.day)} vs a usual ${money(h.usual)}/day`;
-  if (h.kind === "steady") return `steady at about ${money(h.amount)}/mo on ${h.meters.join(", ")}: a reservation or savings plan could cut it`;
+  if (h.kind === "steady") return `steady at about ${money(h.monthly)}/mo on ${h.meters.join(", ")}: a reservation or savings plan could cut it`;
   return h.reason || "";
 }
 

@@ -1394,13 +1394,13 @@ class SpikeTest(unittest.TestCase):
 class DevTestTest(unittest.TestCase):
     DEV = "/subscriptions/aaaa-1/resourcegroups/tms-dev-rg"
 
-    def data(self, group_label="tms-dev-rg", plan=(5,) * 6, group=None, **extra):
+    def data(self, group_label="tms-dev-rg", plan=(5,) * 14, group=None, **extra):
         group = group or self.DEV
         rows = [(group, f"{group}/providers/microsoft.web/serverfarms/asp-dev", list(plan)),
-                (group, f"{group}/providers/microsoft.sql/servers/s1/elasticpools/pool", [4] * 6),
-                (group, f"{group}/providers/microsoft.storage/storageaccounts/stdev", [2] * 6),  # not compute
-                (RG, f"{RG}/providers/microsoft.web/serverfarms/asp-prod", [9] * 6)]              # not dev/test
-        data = make_data([("Storage", "LRS", [1] * 6)], resource_rows=rows, **extra)
+                (group, f"{group}/providers/microsoft.sql/servers/s1/elasticpools/pool", [4] * 14),
+                (group, f"{group}/providers/microsoft.storage/storageaccounts/stdev", [2] * 14),  # not compute
+                (RG, f"{RG}/providers/microsoft.web/serverfarms/asp-prod", [9] * 14)]              # not dev/test
+        data = make_data([("Storage", "LRS", [1] * 14)], resource_rows=rows, **extra)
         data["views"]["resource"]["names"][group] = group_label
         return data
 
@@ -1409,10 +1409,10 @@ class DevTestTest(unittest.TestCase):
 
     def test_always_on_compute_in_a_dev_group(self):
         (h,) = self.devtest(self.data())
-        self.assertEqual((h["group"], h["label"], h["resources"], h["amount"]), (self.DEV, "tms-dev-rg", 2, 27.0))
+        self.assertEqual((h["group"], h["label"], h["resources"], h["amount"]), (self.DEV, "tms-dev-rg", 2, 63.0))
 
     def test_something_that_stops_on_some_days_is_not_always_on(self):
-        (h,) = self.devtest(self.data(plan=(5, 5, 5, 5, 0, 5)))
+        (h,) = self.devtest(self.data(plan=(5,) * 13 + (0,)))
         self.assertEqual(h["resources"], 1)  # only the pool
 
     def test_dev_must_be_a_word_in_the_name(self):
@@ -1493,38 +1493,92 @@ class AdvisorLinkTest(unittest.TestCase):
 
 class SteadyTest(unittest.TestCase):
     def steady(self, data):
-        return [(h["service"], h["amount"]) for h in aztree.summarize(data)["hints"] if h["kind"] == "steady"]
+        return [(h["service"], h["monthly"]) for h in aztree.summarize(data)["hints"] if h["kind"] == "steady"]
 
     def test_steady_reservable_spend_without_advisor(self):
-        found = dict(self.steady(make_data(BILL, advisor=None)))
-        self.assertEqual(found["SQL Database"], round(120 / 3 * 30.4, 2))  # vCore only: DTUs can't be reserved
-        self.assertEqual(found["Azure App Service"], round(72 / 3 * 30.4, 2))  # P1 v3 + P0v3, not S2 or B1
+        found = dict(self.steady(make_data(weeks(BILL), advisor=None)))
+        self.assertEqual(found["SQL Database"], round(280 / 7 * 30.4, 2))  # vCore only: DTUs can't be reserved
+        self.assertEqual(found["Azure App Service"], round(168 / 7 * 30.4, 2))  # P1 v3 + P0v3, not S2 or B1
         self.assertNotIn("Storage", found)
 
     def test_hidden_when_advisor_has_commitment_tips(self):
-        self.assertEqual(self.steady(make_data(BILL, advisor=[tip(SAVINGS_PLAN, "Compute_Savings_Plan")])), [])
+        self.assertEqual(self.steady(make_data(weeks(BILL), advisor=[tip(SAVINGS_PLAN, "Compute_Savings_Plan")])), [])
 
     def test_shown_when_advisor_failed(self):
-        self.assertTrue(self.steady(make_data(BILL, advisor=[], advisor_error="HTTP 403")))
+        self.assertTrue(self.steady(make_data(weeks(BILL), advisor=[], advisor_error="HTTP 403")))
 
     def test_spend_that_moves_is_not_steady(self):
-        rows = [("SQL Database", "vCore", [40, 40, 40, 20, 60, 30])]
+        rows = [("SQL Database", "vCore", [40] * 7 + [40, 20, 60, 30, 50, 20, 60])]
         self.assertEqual(self.steady(make_data(rows, advisor=None)), [])
 
     def test_small_spend_is_not_worth_committing(self):
-        self.assertEqual(self.steady(make_data([("SQL Database", "vCore", [3] * 6)], advisor=None)), [])  # ~$91/mo
+        self.assertEqual(self.steady(make_data([("SQL Database", "vCore", [3] * 14)], advisor=None)), [])  # ~$91/mo
 
     def test_amortized_cost_hides_it(self):
         # reserved usage already looks flat under AmortizedCost; Advisor knows what's reserved, this can't
-        self.assertEqual(self.steady(make_data(BILL, advisor=None, metric="AmortizedCost")), [])
+        self.assertEqual(self.steady(make_data(weeks(BILL), advisor=None, metric="AmortizedCost")), [])
 
     @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
     def test_the_page_shows_it_and_opens_the_service(self):
-        data = make_data([("SQL Database", "vCore", [40] * 6)], advisor=None)
+        data = make_data([("SQL Database", "vCore", [40] * 14)], advisor=None)
         page = ViewerTest.run_page(self, data, "service")
         self.assertIn("steady", page["side"])
         page = ViewerTest.run_page(self, data, "service", click="[data-hint]:0")
         self.assertIn('<div class="sel-name">SQL Database</div>', page["side"])
+
+    render = ViewerTest.render
+
+
+def weeks(rows, n=14):
+    """The same flat rows over n days (split in the middle): steady and dev/test need a week of current days."""
+    return [(s, m, [d[0]] * n) for s, m, d in rows]
+
+
+class Batch3ReviewTest(unittest.TestCase):
+    """Findings from the batch 3 review, each reproduced before it was fixed."""
+
+    def test_steady_hints_rank_by_the_same_dollars_as_other_to_dos(self):
+        rows = [("SQL Database", "vCore", [40] * 14), ("Log Analytics", "Analytics Logs Data Ingestion", [50] * 14)]
+        todos = [h["kind"] for h in aztree.summarize(make_data(rows, advisor=None))["hints"]]
+        self.assertEqual(todos, ["pit", "steady"])  # $350 of ingestion this week before $280 of vCore
+
+    def test_a_synapse_reservation_is_not_sql_database(self):
+        rec = tip("Consider Azure Synapse Analytics (formerly SQL DW) reserved instance to save over the pay-as-you-go costs")
+        (linked,) = aztree.summarize(make_data(BILL, advisor=[rec]))["advisor"]
+        self.assertEqual(linked["covers"], [])
+
+    def test_spot_vms_are_not_covered_by_commitments(self):
+        rows = BILL + [("Virtual Machines", "D2s v5 Spot", [3] * 6), ("Virtual Machines", "D2 v3 Low Priority", [2] * 6)]
+        (linked,) = aztree.summarize(make_data(rows, advisor=[tip(SAVINGS_PLAN, "Compute_Savings_Plan")]))["advisor"]
+        self.assertNotIn("D2s v5 Spot", [c["meter"] for c in linked["covers"]])
+        self.assertNotIn("D2 v3 Low Priority", [c["meter"] for c in linked["covers"]])
+
+    def test_no_spike_on_a_meter_that_nets_to_nothing(self):
+        rows = [SpikeTest.STEADY, ("Azure Cosmos DB", "Reserved 100 RU/s", series(base=0.0, at={10: 5.0, 45: 60.0, 50: -60.0}))]
+        self.assertEqual([h for h in aztree.summarize(make_data(rows))["hints"] if h["kind"] == "spike"], [])
+
+    def test_short_periods_make_no_steady_or_dev_test_hints(self):
+        kinds = {h["kind"] for h in aztree.summarize(make_data(BILL, advisor=None))["hints"]}  # 3 current days
+        self.assertFalse(kinds & {"steady", "devtest"})
+
+    def test_more_dev_test_names(self):
+        for name in ("rg-devtest", "testing-rg", "rg-development", "rg-non-prod", "rg-preprod", "rg-pre-prod"):
+            self.assertTrue(aztree.DEV_TEST.search(name), name)
+        for name in ("rg-devices", "contest", "rg-devops", "latest", "pentest"):
+            self.assertFalse(aztree.DEV_TEST.search(name), name)
+
+    def test_the_demo_has_a_dev_test_group(self):
+        hints = aztree.summarize(aztree.demo(30, today=TODAY))["hints"]
+        self.assertTrue([h for h in hints if h["kind"] == "devtest"])
+
+    def test_covers_is_explained_for_multi_subscription_runs(self):
+        self.assertIn("across the whole bill", aztree.AI_INSTRUCTIONS)
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_dev_test_text_claims_only_what_was_measured(self):
+        page = ViewerTest.run_page(self, DevTestTest().data(), "service")
+        self.assertNotIn("168 hours", page["side"])
+        self.assertIn("every day", page["side"])
 
     render = ViewerTest.render
 
