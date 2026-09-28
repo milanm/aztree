@@ -497,7 +497,7 @@ function biggestDrops() {
 }
 
 // ---------- worth a look: the hints aztree.py computed (the export's `hints`, in order), placed on the service view
-const HINT_COLOR = { grower: "var(--up)", pit: "var(--accent)" };
+const HINT_COLOR = { grower: "var(--up)", spike: "var(--up)", pit: "var(--accent)" };
 let _hints;
 function worthALook() {
   if (_hints) return _hints;
@@ -509,6 +509,7 @@ function worthALook() {
 }
 function hintText(h) {
   if (h.kind === "grower") return h.previous < 0.01 ? "new this period" : `up ${pct(h.change / h.previous)} (+${money(h.change)}) vs previous ${DAYS}d`;
+  if (h.kind === "spike") return `spiked on ${day(h.date)}: ${money(h.day)} vs a usual ${money(h.usual)}/day`;
   return h.reason || "";
 }
 

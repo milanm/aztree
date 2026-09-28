@@ -15,6 +15,7 @@ import os
 import random
 import re
 import shutil
+import statistics
 import subprocess
 import sys
 import time
@@ -515,6 +516,12 @@ def demo(days, today=None):
     for view, key in (("service", ("Azure Cosmos DB", "Reserved 100 RU/s")), ("subscription", (P, "Azure Cosmos DB")),
                       ("region", ("us east", "Azure Cosmos DB")), ("resource", (gkey, rid))):
         rows[view].setdefault(key, [0.0] * n)[max(days, n - 6)] -= 150.0
+    # a one-off backfill: Data Factory moved a year of data in one day, a spike for "worth a look"
+    rid = demo_rid(D, "rg-etl", "microsoft.datafactory/factories/adf-etl")
+    gkey = group_key({"scope": f"/subscriptions/{D}"}, "rg-etl", rid)
+    for view, key in (("service", ("Azure Data Factory v2", "Cloud Data Movement")), ("subscription", (D, "Azure Data Factory v2")),
+                      ("region", ("eu west", "Azure Data Factory v2")), ("resource", (gkey, rid))):
+        rows[view].setdefault(key, [0.0] * n)[max(days, n - 9)] += 180.0
     return {
         "days": dates, "split": days,
         "views": {v: {"dims": VIEWS[v], "names": names[v], "rows": pack(rows[v])} for v in VIEWS},
@@ -637,6 +644,29 @@ AI_INSTRUCTIONS = (
 TOP_RESOURCES = 20  # per resource group in the export; the rest are summed
 
 
+def spike(daily, split, floor):
+    """The biggest one-off day in the current period (days from `split` on), or None. A spike is at least `floor`
+    above the meter's usual day (the median of the 14 days before it) and at least 3x it, or any amount on a meter
+    that's usually zero. More than 3 such days is a trend, which the growers cover. A charge with one half its size
+    27-31 days earlier is a monthly bill, not a spike."""
+    found = []
+    for i in range(split, len(daily)):
+        prior = daily[max(0, i - 14):i]
+        if len(prior) < 7:
+            continue
+        usual = statistics.median(prior)
+        excess = daily[i] - usual
+        if excess >= floor and (usual <= 0 or daily[i] >= 3 * usual):
+            found.append({"day": i, "usual": usual, "excess": excess})
+    if not 1 <= len(found) <= 3:
+        return None
+    best = max(found, key=lambda s: s["excess"])
+    i = best["day"]
+    if any(v >= 0.5 * daily[i] for v in daily[max(0, i - 31):max(0, i - 26)]):
+        return None
+    return best
+
+
 def summarize(data):
     """Turn the raw daily data into a compact JSON an AI agent can reason about."""
     days, split = data["days"], data["split"]
@@ -716,8 +746,17 @@ def summarize(data):
         if why and x["current"] >= grand * 0.002:
             flags.append({"service": x["service"], "meter": x["meter"], "current": x["current"], "reason": why})
             todos.append(hint("pit", x, x["current"], reason=why))
+    items = {(x["service"], x["meter"]): x for x in line_items}
+    spiked = {}
+    for r in data["views"]["service"]["rows"]:
+        s = spike(r["d"], split, floor=max(10, grand * 0.0025))
+        if s and tuple(r["k"]) in items:
+            spiked[tuple(r["k"])] = hint("spike", items[tuple(r["k"])], s["excess"], date=days[s["day"]],
+                                         day=money(r["d"][s["day"]]), usual=money(s["usual"]))
     flagged = {(f["service"], f["meter"]) for f in flags}
-    news = [hint("grower", x, x["change"]) for x in growing if (x["service"], x["meter"]) not in flagged]
+    news = sorted([*spiked.values(), *(hint("grower", x, x["change"]) for x in growing
+                                       if (x["service"], x["meter"]) not in flagged | set(spiked))],
+                  key=lambda h: -h["amount"])
     hints = [h for pair in zip_longest(news, todos) for h in pair if h]
 
     daily = [0.0] * len(days)

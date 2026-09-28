@@ -563,17 +563,20 @@ RG = "/subscriptions/aaaa-1/resourcegroups/rg-app"
 
 
 def make_data(service_rows, resource_rows=(), advisor=None, **extra):
-    """A minimal data dict in the shape fetch() returns. Rows are (k1, k2, [6 daily values]); split after day 3."""
+    """A minimal data dict in the shape fetch() returns. Rows are (k1, k2, [daily values]): 6 values are Sep 22-27,
+    split after day 3; longer series get consecutive days ending Sep 27, split in the middle."""
     def view(dims, rows, names=None):
         return {"dims": dims, "names": names or {}, "rows": [{"k": [a, b], "d": d} for a, b, d in rows]}
 
+    n = len(service_rows[0][2]) if service_rows else 6
+    days = DAYS6 if n == 6 else [(aztree.dt.date(2026, 9, 27) - aztree.dt.timedelta(n - 1 - i)).isoformat() for i in range(n)]
     sub_rows = {}
     for svc, _, d in service_rows:
-        acc = sub_rows.setdefault(svc, [0.0] * 6)
+        acc = sub_rows.setdefault(svc, [0.0] * n)
         for i, v in enumerate(d):
             acc[i] += v
     data = {
-        "days": DAYS6, "split": 3, "currency": "USD", "metric": "ActualCost", "generated": "2026-09-28 09:00",
+        "days": days, "split": n // 2, "currency": "USD", "metric": "ActualCost", "generated": "2026-09-28 09:00",
         "subscriptions": [{"id": "aaaa-1", "name": "acme-prod", "currency": "USD"}],
         "views": {
             "service": view(["ServiceName", "Meter"], service_rows),
@@ -1338,6 +1341,52 @@ class HintsTest(unittest.TestCase):
         self.assertIn("up 100% (+$15.00) vs previous 3d", page["side"])
         self.assertIn("Log Analytics ingestion", page["side"])
         self.assertEqual(page["side"].count('data-hint="'), 2)
+
+    render = ViewerTest.render
+
+
+def series(n=60, base=5.0, at=None):
+    """n daily values of `base`, with {day index: value} overrides."""
+    d = [base] * n
+    for i, v in (at or {}).items():
+        d[i] = v
+    return d
+
+
+class SpikeTest(unittest.TestCase):
+    STEADY = ("Storage", "Hot LRS Data Stored", series(base=20))
+
+    def spikes(self, *rows):
+        return [h for h in aztree.summarize(make_data([self.STEADY, *rows]))["hints"] if h["kind"] == "spike"]
+
+    def test_a_one_day_charge_is_a_spike(self):
+        (spike,) = self.spikes(("Azure Data Factory v2", "Cloud Data Movement", series(at={45: 60.0})))
+        data = make_data([self.STEADY])
+        self.assertEqual((spike["meter"], spike["date"], spike["day"], spike["usual"], spike["amount"]),
+                         ("Cloud Data Movement", data["days"][45], 60.0, 5.0, 55.0))
+
+    def test_a_charge_on_a_meter_that_is_usually_zero_is_a_spike(self):
+        (spike,) = self.spikes(("Support", "Professional Direct", series(base=0.0, at={40: 80.0})))
+        self.assertEqual(spike["usual"], 0.0)
+
+    def test_a_step_change_is_a_grower_not_a_spike(self):
+        hints = aztree.summarize(make_data([self.STEADY, ("SQL Database", "vCore", [5.0] * 35 + [50.0] * 25)]))["hints"]
+        self.assertEqual([h["kind"] for h in hints if h["meter"] == "vCore"], ["grower"])
+
+    def test_a_monthly_charge_is_not_a_spike(self):
+        self.assertEqual(self.spikes(("Azure DevOps", "Basic Plan", series(base=0.0, at={10: 100.0, 40: 100.0}))), [])
+
+    def test_small_wobbles_are_not_spikes(self):
+        self.assertEqual(self.spikes(("Key Vault", "Operations", series(base=0.01, at={45: 0.05}))), [])
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_the_page_says_when_and_how_much(self):
+        data = make_data([self.STEADY, ("Azure Data Factory v2", "Cloud Data Movement", series(at={45: 60.0}))])
+        page = ViewerTest.run_page(self, data, "service")
+        self.assertIn("spiked on Sep 13: $60.00 vs a usual $5.00/day", page["side"])
+
+    def test_the_demo_has_one(self):
+        self.assertTrue([h for h in aztree.summarize(aztree.demo(30, today=TODAY))["hints"] if h["kind"] == "spike"])
 
     render = ViewerTest.render
 
