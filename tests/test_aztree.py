@@ -695,6 +695,68 @@ class ViewerTest(unittest.TestCase):
         self.assertIn("needs Reader", page["side"])
 
 
+class MainTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.dir = Path(tempfile.mkdtemp())
+        self.saved = self.dir / "aztree-data.json"
+        self.saved.write_text(json.dumps(BASIC), encoding="utf-8")
+
+        def no_azure(*a, **k):
+            raise AssertionError("must not call Azure")
+
+        self.patches = {"get_token": aztree.get_token, "fetch": aztree.fetch}
+        aztree.get_token = aztree.fetch = no_azure
+
+    def tearDown(self):
+        for name, fn in self.patches.items():
+            setattr(aztree, name, fn)
+
+    def main(self, *argv):
+        out = io.StringIO()
+        from contextlib import redirect_stdout
+        with redirect_stdout(out):
+            aztree.main(list(argv))
+        return out.getvalue()
+
+    def test_from_saved_data_writes_the_page_without_azure(self):
+        page = self.dir / "page.html"
+        self.main("--from", str(self.saved), "--out", str(page), "--no-open")
+        self.assertIn('"tool":"aztree"', page.read_text(encoding="utf-8"))
+
+    def test_export_writes_the_summary_instead_of_the_page(self):
+        target = self.dir / "summary.json"
+        self.main("--from", str(self.saved), "--export", str(target))
+        self.assertEqual(json.loads(target.read_text(encoding="utf-8"))["totals"]["current"], 51.0)
+
+    def test_days_out_of_range_dies(self):
+        with self.assertRaises(SystemExit):
+            quiet(self.main, "--from", str(self.saved), "--days", "0")
+        with self.assertRaises(SystemExit):
+            quiet(self.main, "--from", str(self.saved), "--days", "184")
+
+    def test_scope_and_subscription_do_not_mix(self):
+        with self.assertRaises(SystemExit):
+            quiet(self.main, "--scope", "/providers/Microsoft.Billing/billingAccounts/1", "--subscription", "x")
+
+
+class TargetsTest(unittest.TestCase):
+    def args(self, **kw):
+        return SimpleNamespace(**{"scope": None, "subscription": [], "all": False, **kw})
+
+    def test_scope_is_read_as_given(self):
+        targets = aztree.resolve_targets(self.args(scope="providers/Microsoft.Billing/billingAccounts/123/"), az=None)
+        self.assertEqual(targets, [{"id": "/providers/Microsoft.Billing/billingAccounts/123",
+                                    "name": "/providers/Microsoft.Billing/billingAccounts/123",
+                                    "scope": "/providers/Microsoft.Billing/billingAccounts/123"}])
+
+    def test_subscriptions_are_resolved_against_arm(self):
+        send = FakeSend((200, {}, json.dumps({"value": [
+            {"subscriptionId": "aaaa-1", "displayName": "acme-prod", "state": "Enabled"}]}).encode()))
+        targets = aztree.resolve_targets(self.args(subscription=["acme-prod"]), az=client(send))
+        self.assertEqual(targets, [{"id": "aaaa-1", "name": "acme-prod", "scope": "/subscriptions/aaaa-1"}])
+
+
 class ExplainTest(unittest.TestCase):
     def test_403_mentions_cost_management_reader(self):
         self.assertIn("Cost Management Reader", aztree.explain(aztree.AzureError(403, "denied")))

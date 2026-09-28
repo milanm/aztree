@@ -6,6 +6,7 @@
 
 Needs a logged-in Azure CLI (`az login`), or a token in AZURE_ACCESS_TOKEN. No other dependencies.
 """
+import argparse
 import datetime as dt
 import json
 import os
@@ -17,6 +18,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 from collections import Counter
 from pathlib import Path
 
@@ -440,6 +442,72 @@ def render(data, out):
     # < keeps names like "</script>" or "<!--" from ending the script block early
     blob = json.dumps(page, separators=(",", ":"), ensure_ascii=False).replace("<", "\\u003c")
     out.write_text(html.replace("__AZTREE_DATA__", blob), encoding="utf-8")
+
+
+def resolve_targets(args, az):
+    if args.scope:
+        return [scope_target(args.scope)]
+    current = None if (args.all or args.subscription) else current_subscription()
+    return [subscription_target(s) for s in pick_subscriptions(list_subscriptions(az), args.subscription, args.all, current)]
+
+
+def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):  # subscription names can hold characters a Windows pipe can't encode
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+    ap = argparse.ArgumentParser(description="See where your Azure money goes, as a treemap.")
+    who = ap.add_mutually_exclusive_group()
+    who.add_argument("--subscription", action="append", default=[], metavar="ID_OR_NAME",
+                     help="subscription to read, repeat for more (default: the Azure CLI's current one)")
+    who.add_argument("--all", action="store_true", help="read every enabled subscription you can see")
+    who.add_argument("--scope", help="any Cost Management scope, e.g. a billing account (not tested yet)")
+    ap.add_argument("--days", type=int, default=30, help="period to show, compared with the period before it (default 30)")
+    ap.add_argument("--metric", default="ActualCost", choices=["ActualCost", "AmortizedCost"],
+                    help="AmortizedCost spreads reservation and savings plan purchases over their term")
+    ap.add_argument("--no-advisor", action="store_true", help="skip Azure Advisor's cost recommendations")
+    ap.add_argument("--from", dest="source", metavar="JSON", help="re-open saved data (out/aztree-data.json) without calling Azure")
+    ap.add_argument("--out", default=str(OUT / "aztree.html"), help="where to write the page (default out/aztree.html)")
+    ap.add_argument("--no-open", action="store_true", help="don't open the browser")
+    ap.add_argument("--export", nargs="?", const=str(OUT / "aztree-export.json"), metavar="FILE",
+                    help="write a summary JSON for an AI agent (default out/aztree-export.json) instead of the page")
+    ap.add_argument("--verbose", action="store_true", help="print the query units each request used")
+    args = ap.parse_args(argv)
+
+    if not 1 <= args.days <= 180:
+        die("--days must be between 1 and 180 (aztree reads two periods, and a query spans a year at most).")
+
+    if args.source:
+        data = json.loads(Path(args.source).read_text(encoding="utf-8"))
+    else:
+        try:
+            az = Azure(get_token(), verbose=args.verbose)
+            targets = resolve_targets(args, az)
+            who_ = targets[0]["name"] if len(targets) == 1 else f"{len(targets)} subscriptions"
+            print(f"aztree: reading {who_}, last {args.days} days (+{args.days} before, for comparison)")
+            data = fetch(az, targets, args.days, args.metric, advisor=not args.no_advisor)
+        except AzureError as e:
+            die(explain(e))
+        data.update(generated=dt.datetime.now().strftime("%Y-%m-%d %H:%M"), metric=args.metric)
+        OUT.mkdir(exist_ok=True)
+        (OUT / "aztree-data.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    if args.export:
+        path = Path(args.export).resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        export(data, path)
+        print(f"aztree: wrote {path}  (give this file to your AI agent)")
+        return
+
+    out = Path(args.out).resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    render(data, out)
+    print(f"aztree: wrote {out}")
+    if not args.no_open:
+        webbrowser.open(out.as_uri())
+
+
+if __name__ == "__main__":
+    main()
 
 
 def advisor_rec(p, target):
