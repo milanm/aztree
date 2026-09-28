@@ -97,6 +97,8 @@ aside { grid-column: 2; grid-row: 2 / 4; border-left: 1px solid var(--line); bac
 .foot { margin-top: auto; border-top: 1px solid var(--line); padding-top: 14px; }
 .foot .h b { color: var(--advisor); }
 .note { color: var(--dim); margin-top: 9px; }
+.showall { color: var(--muted); margin-top: 10px; font-size: 11px; cursor: pointer; }
+.showall:hover { color: var(--text); }
 
 footer { grid-column: 1 / -1; display: flex; align-items: center; gap: 14px; padding: 7px 14px; border-top: 1px solid var(--line);
   color: var(--dim); white-space: nowrap; overflow: hidden; }
@@ -151,7 +153,7 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const hashView = (() => { try { return decodeURIComponent(location.hash.slice(1)); } catch { return ""; } })();
 const state = { view: VIEW_KEYS.includes(hashView) && DATA.views[hashView] ? hashView : "service",
-  change: false, filter: "", zoom: null, sel: null };
+  change: false, filter: "", zoom: null, sel: null, expanded: { hints: false, recs: false } };
 
 // ---------- formatting
 const SYMBOLS = { USD: "$", EUR: "€", GBP: "£", JPY: "¥", CNY: "¥", INR: "₹", KRW: "₩", BRL: "R$", AUD: "A$", CAD: "C$",
@@ -437,12 +439,12 @@ function renderSide() {
 
   const hints = worthALook();
   if (hints.length) {
-    const max = Math.max(...hints.map(h => h.n.cur));
+    const shown = state.expanded.hints ? hints : hints.slice(0, SHOWN_HINTS), max = Math.max(...shown.map(h => h.n.cur));
     html += `<section><div class="h">Worth a look <b>${money(hints.reduce((s, h) => s + h.n.cur, 0))}</b></div>` +
-      hints.map((h, i) => `<div class="hint" data-hint="${i}" style="--c:${h.c}">
+      shown.map((h, i) => `<div class="hint" data-hint="${i}" style="--c:${h.c}">
         <div class="hn" title="${esc(h.n.full)}">${esc(shortSvc(h.n.parent.key))} · ${esc(h.n.name)}</div><div class="hv">${money(h.n.cur)}</div>
         <div class="hs" title="${esc(h.why)}">${esc(h.why)}</div><div class="hb"><i style="width:${(h.n.cur / max) * 100}%"></i></div></div>`).join("") +
-      `</section>`;
+      showAll("hints", hints.length, SHOWN_HINTS) + `</section>`;
   }
   const drops = biggestDrops();
   if (drops.length) {
@@ -459,7 +461,10 @@ function renderSide() {
 
 // ---------- Azure Advisor: cost recommendations, read by aztree.py (none when run with --no-advisor)
 const TERM = { P1Y: "1-yr term", P3Y: "3-yr term", P5Y: "5-yr term" };
-const SHOWN_RECS = 5;
+const SHOWN_RECS = 5, SHOWN_HINTS = 6;
+// a long list opens in place: "show all N" / "show fewer"
+const showAll = (list, n, cap) => (n > cap
+  ? `<div class="showall" data-more="${list}">${state.expanded[list] ? "show fewer" : `show all ${n}`}</div>` : "");
 function advisorPanel() {
   const recs = DATA.advisor;
   if (!recs) return "";
@@ -470,14 +475,14 @@ function advisorPanel() {
       : `Advisor couldn't be read (${esc(err)}).`;
     return `<section class="foot"><div class="h">Advisor</div><div class="note">${why}</div></section>`;
   }
-  const top = recs.slice(0, SHOWN_RECS), max = Math.max(...top.map(r => r.annual_savings || 0), 1);
+  const top = state.expanded.recs ? recs : recs.slice(0, SHOWN_RECS), max = Math.max(...top.map(r => r.annual_savings || 0), 1);
   return `<section class="foot"><div class="h">Advisor <b>${recs.length} cost tip${recs.length > 1 ? "s" : ""}</b></div>` +
     top.map((r, i) => `<div class="hint" data-rec="${i}" style="--c:var(--advisor)">
       <div class="hn" title="${esc(r.solution || r.problem)}">${esc(r.problem)}</div>
       <div class="hv">${r.annual_savings ? money(r.annual_savings, sym(r.currency || DATA.currency)) + "/yr" : "–"}</div>
       <div class="hs" title="${esc(r.resource || "")}">${esc([r.resource_name, r.sku, Object.hasOwn(TERM, r.term) && TERM[r.term]].filter(Boolean).join(" · "))}</div>
       <div class="hb"><i style="width:${((r.annual_savings || 0) / max) * 100}%"></i></div></div>`).join("") +
-    (recs.length > SHOWN_RECS ? `<div class="note">+${recs.length - SHOWN_RECS} more in Export for AI</div>` : "") + `</section>`;
+    showAll("recs", recs.length, SHOWN_RECS) + `</section>`;
 }
 
 // ---------- biggest drops: what fell since the previous period, including what went to zero (always the service view)
@@ -508,9 +513,9 @@ function worthALook() {
     const why = n.prev < 0.01 ? "new this period" : `up ${pct(d / n.prev)} (+${money(d)}) vs previous ${DAYS}d`;
     if (n.prev < 0.01 || d / n.prev > 0.2) out.push({ n, why, c: "var(--up)", d });
   }
-  const pits = out.filter(h => !h.d).sort((a, b) => b.n.cur - a.n.cur).slice(0, 3);
-  const growers = out.filter(h => h.d).sort((a, b) => b.d - a.d).slice(0, 3);
-  return (_hints = [...growers, ...pits]);
+  const pits = out.filter(h => !h.d).sort((a, b) => b.n.cur - a.n.cur);
+  const growers = out.filter(h => h.d).sort((a, b) => b.d - a.d);
+  return (_hints = [...growers, ...pits]); // the panel shows the first few; "show all" opens the rest
 }
 
 // ---------- interaction
@@ -561,6 +566,8 @@ $("#filter").addEventListener("input", e => {
   render();
 });
 $("#side").addEventListener("click", e => {
+  const more = e.target.closest("[data-more]");
+  if (more) { state.expanded[more.dataset.more] = !state.expanded[more.dataset.more]; renderSide(); return; }
   const h = e.target.closest("[data-hint]"), dr = e.target.closest("[data-drop]"), r = e.target.closest("[data-rec]");
   const same = leaf => n => n.kind === "leaf" && n.key === leaf.key && n.parent.key === leaf.parent.key;
   if (h) {

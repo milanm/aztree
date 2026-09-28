@@ -1305,6 +1305,36 @@ class Batch1ReviewTest(unittest.TestCase):
 
 
 @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+class ShowAllTest(unittest.TestCase):
+    render = ViewerTest.render
+    run_page = ViewerTest.run_page
+    # nine flagged meters, all big enough to show: more than the panel's first screen
+    PITS9 = [("Log Analytics", "Analytics Logs Data Ingestion", [30] * 6), ("Azure Cosmos DB", "100 RU/s", [20] * 6),
+             ("Azure Front Door Service", "Premium Base Fees", [11] * 6), ("SQL Database", "eDTUs", [10] * 6),
+             ("SQL Database", "S2 DTUs", [9] * 6), ("Azure DevOps", "Basic User", [8] * 6),
+             ("Virtual Network", "Standard Private Endpoint", [7] * 6), ("Bandwidth", "Standard Data Transfer Out", [6] * 6),
+             ("Azure Monitor", "Alerts System Log Monitored at 1 Minute Frequency", [5] * 6)]
+    RECS = [{"problem": f"Tip {i}", "solution": "", "resource": "/subscriptions/aaaa-1", "resource_name": "acme-prod",
+             "sku": None, "term": None, "annual_savings": 100.0 - i, "currency": "USD", "subscription": "acme-prod"}
+            for i in range(8)]
+
+    def test_worth_a_look_shows_six_then_all(self):
+        page = self.run_page(make_data(self.PITS9), "service")
+        self.assertEqual(page["side"].count('data-hint="'), 6)
+        self.assertIn("show all 9", page["side"])
+        page = self.run_page(make_data(self.PITS9), "service", click="[data-more]:hints")
+        self.assertEqual(page["side"].count('data-hint="'), 9)
+        self.assertIn("show fewer", page["side"])
+
+    def test_advisor_shows_five_then_all(self):
+        page = self.run_page(make_data([("Storage", "LRS", [5] * 6)], advisor=self.RECS), "service")
+        self.assertEqual(page["side"].count('data-rec="'), 5)
+        self.assertIn("show all 8", page["side"])
+        page = self.run_page(make_data([("Storage", "LRS", [5] * 6)], advisor=self.RECS), "service", click="[data-more]:recs")
+        self.assertEqual(page["side"].count('data-rec="'), 8)
+
+
+@unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
 class ViewerEdgesTest(unittest.TestCase):
     render = ViewerTest.render
     run_page = ViewerTest.run_page
