@@ -215,9 +215,10 @@ class Router:
     """Fake Cost Management: answers each query from `tables[(dim1, dim2)][scope]`, a list of
     (usage_date, value1, value2, cost, currency, cost_usd) tuples."""
 
-    def __init__(self, tables, explode=(), reject_usd=False, reject=()):
+    def __init__(self, tables, explode=(), reject_usd=False, reject=(), reject_for=None):
         self.tables, self.explode = tables, explode
         self.reject = set(reject) | ({"CostUSD"} if reject_usd else set())
+        self.reject_for = reject_for or {}  # scope -> aggregations only that scope refuses
         self.bodies = []
 
     def __call__(self, method, url, data, headers):
@@ -225,9 +226,10 @@ class Router:
         self.bodies.append(body)
         dims = tuple(g["name"] for g in body["dataset"]["grouping"])
         aggs = [a["name"] for a in body["dataset"]["aggregation"].values()]
-        if self.reject & set(aggs):
-            return error(400, "BadRequest", f"Invalid aggregation {sorted(self.reject & set(aggs))}")
         scope = url.split("/providers/Microsoft.CostManagement")[0][len(aztree.ARM):]
+        refused = (self.reject | set(self.reject_for.get(scope, ()))) & set(aggs)
+        if refused:
+            return error(400, "BadRequest", f"Invalid aggregation {sorted(refused)}")
         if dims in self.explode:
             return page(["Cost"], [], next_link=url.split("&")[0] + "&$skiptoken=more")
         cols = aggs + ["UsageDate", *dims, "Currency"]
@@ -261,7 +263,7 @@ DEV = {"id": "bbbb-2", "name": "acme-dev"}
 
 
 def fetch(tables, targets=(PROD,), **kw):
-    router = Router(tables, **{k: kw.pop(k) for k in ("explode", "reject_usd", "reject") if k in kw})
+    router = Router(tables, **{k: kw.pop(k) for k in ("explode", "reject_usd", "reject", "reject_for") if k in kw})
     data = aztree.fetch(client(router), [aztree.subscription_target(t) for t in targets], 3, "ActualCost",
                         advisor=False, log=lambda *a: None, today=TODAY)
     return data, router
@@ -951,6 +953,20 @@ class ReviewFixesTest(unittest.TestCase):
         self.assertIn("HTTP 500", page["side"])
 
     render = ViewerTest.render
+
+
+class SecondReviewTest(unittest.TestCase):
+    """Findings from the second review, each reproduced before it was fixed."""
+
+    def test_usd_is_used_only_when_every_row_has_it(self):
+        # prod can't report USD (so it falls back to Cost); dev then refuses Cost and answers in PreTaxCost/PreTaxCostUSD
+        tables = {("ServiceName", "Meter"): {
+            "/subscriptions/aaaa-1": [(20260925, "Storage", "LRS", 100.0, "EUR", None)],
+            "/subscriptions/bbbb-2": [(20260925, "Storage", "LRS", 200.0, "USD", None)],
+        }}
+        data, _ = fetch(tables, targets=(PROD, DEV),
+                        reject_for={"/subscriptions/aaaa-1": {"CostUSD"}, "/subscriptions/bbbb-2": {"Cost"}})
+        self.assertEqual(rows_of(data, "service")[("Storage", "LRS")][3], 300.0)
 
 
 class ExplainTest(unittest.TestCase):

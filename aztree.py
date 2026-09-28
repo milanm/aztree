@@ -318,7 +318,8 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None):
         recs.sort(key=lambda r: -(r["annual_savings"] or -1))
 
     found = {s["currency"] for s in subs if s["currency"]}
-    usd = len(found) > 1 and any(a.endswith("USD") for a in aggs[0])
+    # USD only if every row has a USD figure: a subscription may have answered in its billing currency alone
+    usd = len(found) > 1 and all(cost_usd is not None for entries in raw.values() for *_, cost_usd in entries)
     if len(found) > 1 and not usd:
         log("  warning: these subscriptions bill in different currencies and Azure won't convert them; totals mix currencies")
     log(f"  done: {az.requests} requests (Cost Management queries are free)")
