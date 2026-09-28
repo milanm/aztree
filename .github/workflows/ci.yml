@@ -45,3 +45,37 @@ jobs:
           /tmp/v/bin/aztree --version
           AZTREE_HOME=/tmp/home /tmp/v/bin/aztree --demo --no-open
           test -s /tmp/home/aztree.html
+  native:
+    # the frozen executable and the dotnet tool that carries it: built, installed and run on each OS
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, rid: win-x64 }
+          - { os: ubuntu-22.04, rid: linux-x64 }
+          - { os: macos-15, rid: osx-arm64 }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "8.0.x"
+      - run: python -m pip install "pyinstaller==6.*"
+      - name: Freeze aztree and check the executable
+        run: python packaging/build_native.py --rid ${{ matrix.rid }}
+      - name: Pack the dotnet tool with it, install it, run it
+        shell: bash
+        run: |
+          ext=""; [ "${{ matrix.rid }}" = "win-x64" ] && ext=".exe"
+          mkdir -p dotnet/native/${{ matrix.rid }}
+          cp build-native/aztree-${{ matrix.rid }}$ext dotnet/native/${{ matrix.rid }}/aztree$ext
+          version=$(python -c "import aztree; print(aztree.__version__)")
+          dotnet pack dotnet -c Release -p:Version=$version -o nupkg
+          dotnet tool install aztree --tool-path ./.tools --add-source ./nupkg --version $version
+          ./.tools/aztree --version
+          AZTREE_HOME=./.home ./.tools/aztree --demo --no-open
+          test -s ./.home/aztree.html
+          if ./.tools/aztree --days 0; then echo "a bad option must fail through the tool too"; exit 1; fi

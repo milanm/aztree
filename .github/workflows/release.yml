@@ -38,3 +38,82 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+  binaries:
+    # aztree frozen into one executable per platform, so nobody needs Python; each is checked before it ships
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - { os: windows-latest, rid: win-x64 }
+          - { os: ubuntu-22.04, rid: linux-x64 }
+          - { os: ubuntu-22.04-arm, rid: linux-arm64 }
+          - { os: macos-15, rid: osx-arm64 }
+          - { os: macos-15-intel, rid: osx-x64 }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: python -m pip install "pyinstaller==6.*"
+      - run: python packaging/build_native.py --rid ${{ matrix.rid }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.rid }}
+          path: build-native/aztree-${{ matrix.rid }}*
+  github-release:
+    needs: [publish, binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          merge-multiple: true
+          path: native/
+      - name: A GitHub release with the executables attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="$(git log -1 --format=%b)
+
+          Install with \`pipx install aztree\` or \`dotnet tool install -g aztree\`, or download the executable for your system below. The downloads aren't signed yet: Windows and macOS ask once before running them."
+          gh release create "$GITHUB_REF_NAME" native/* --title "aztree ${GITHUB_REF_NAME#v}" --notes "$notes"
+  nuget:
+    # trusted publishing: NuGet.org trusts this workflow, no API key is stored. Off until the NUGET_USER variable is set.
+    needs: [publish, binaries]
+    if: vars.NUGET_USER != ''
+    runs-on: ubuntu-latest
+    environment: nuget
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "8.0.x"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          merge-multiple: true
+          path: native/
+      - name: Put each executable where the launcher looks for it
+        run: |
+          for f in native/aztree-*; do
+            rid=$(basename "$f"); rid=${rid#aztree-}; rid=${rid%.exe}
+            name=aztree; case "$f" in *.exe) name=aztree.exe;; esac
+            mkdir -p "dotnet/native/$rid" && cp "$f" "dotnet/native/$rid/$name"
+          done
+          ls -R dotnet/native
+      - run: dotnet pack dotnet -c Release -p:Version=${GITHUB_REF_NAME#v} -o nupkg
+      - name: The package installs and runs before it's published
+        run: |
+          dotnet tool install aztree --tool-path ./.tools --add-source ./nupkg --version ${GITHUB_REF_NAME#v}
+          ./.tools/aztree --version
+      - uses: NuGet/login@v1
+        id: login
+        with:
+          user: ${{ vars.NUGET_USER }}
+      - run: dotnet nuget push nupkg/*.nupkg --api-key ${{ steps.login.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
