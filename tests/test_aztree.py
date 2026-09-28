@@ -2168,6 +2168,56 @@ class Batch4PageTest(unittest.TestCase):
         self.assertIn("didn't run everywhere (HTTP 500)", page["side"])  # a tenant may have answered
 
 
+@unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+class MapLookTest(unittest.TestCase):
+    render = ViewerTest.render
+    run_page = ViewerTest.run_page
+
+    def test_every_hued_category_shares_one_lightness_and_chroma(self):
+        found = dict(aztree.re.findall(r"--(\w+):\s*oklch\(([^)]*)\)", TEMPLATE))
+        hued = [found[k].split() for k in ("compute", "storage", "database", "network", "ai", "analytics", "ops")]
+        self.assertEqual({(l, c) for l, c, _ in hued}, {("0.72", "0.11")})
+        self.assertEqual(len({h for _, _, h in hued}), 7)
+        self.assertIn("other", found)
+
+    def test_boxes_have_no_outline_and_the_selection_is_amber(self):
+        leaf = aztree.re.search(r"\n\.leaf \{([^}]*)\}", TEMPLATE).group(1)
+        self.assertNotIn("border", leaf)
+        self.assertRegex(TEMPLATE, r"\.cell\.sel \{[^}]*outline: 2px solid var\(--accent\)")
+        self.assertNotRegex(TEMPLATE, r"\.leaf:hover \{[^}]*background:")  # the shorthand would wipe a hatch
+
+    def test_to_dos_are_hatched_where_their_row_jumps(self):
+        # a pit (Log Analytics ingestion) and steady spend (SQL vCore, no Advisor) in the service view
+        data = make_data([("Log Analytics", "Analytics Logs Data Ingestion", [30] * 14), ("SQL Database", "vCore", [40] * 14),
+                          ("Storage", "Hot LRS Data Stored", [5] * 14)], advisor=None)
+        drawn = {d["name"]: d["cls"] for d in self.run_page(data, "service")["drawn"]}
+        self.assertIn("todo", drawn["Analytics Logs Data Ingestion"].split())
+        self.assertIn("todo", drawn["vCore"].split())
+        self.assertNotIn("todo", drawn["Hot LRS Data Stored"].split())
+        self.assertNotIn("todo", drawn["SQL Database"].split())  # groups aren't hatched, their boxes are
+        region = self.run_page(data, "region")["drawn"]
+        self.assertFalse([d for d in region if "todo" in d["cls"].split()])  # no meters there to match
+
+    def test_idle_and_dev_test_boxes_are_hatched_in_the_resource_view(self):
+        page = self.run_page(Batch4PageTest.idle_data(self), "resource")
+        self.assertIn("todo", {d["name"]: d["cls"] for d in page["drawn"]}["d1"].split())
+        dev = self.run_page(DevTestTest().data(), "resource")["drawn"]
+        hatched = {d["name"] for d in dev if "todo" in d["cls"].split()}
+        self.assertEqual(hatched, {"asp-dev", "pool", "stdev"})  # every box of the dev/test group
+
+    def test_the_more_box_is_never_hatched(self):
+        meters = [("Log Analytics", "Analytics Logs Data Ingestion", [1000] * 6)] + [("Log Analytics", f"m {i}", [0.1] * 6) for i in range(30)]
+        more = [d for d in self.run_page(make_data(meters), "service")["drawn"] if d["name"] == "+30 more"]
+        self.assertEqual(len(more), 1)
+        self.assertNotIn("todo", more[0]["cls"].split())
+
+    def test_the_legend_has_a_to_do_swatch_in_both_colour_modes(self):
+        data = make_data([("Log Analytics", "Analytics Logs Data Ingestion", [30] * 6)])
+        self.assertIn('<i class="todo"></i>to-do', self.run_page(data, "service")["sub"])
+        self.assertIn('<i class="todo"></i>to-do', self.run_page(data, "service", click={"press": "c"})["sub"])
+        self.assertNotIn("to-do", self.run_page(data, "region")["sub"])  # nothing hatched there
+
+
 class ExplainTest(unittest.TestCase):
     def test_bad_response_is_not_blamed_on_the_network(self):
         send = FakeSend(page(["UsageDate", "ServiceName", "Meter"], [[20260925, "Storage", "LRS"]]))

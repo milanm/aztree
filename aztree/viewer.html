@@ -8,8 +8,9 @@
 :root {
   --bg: #0d1016; --frame: #050608; --panel: #11151c; --line: #222835; --text: #d6dae2;
   --muted: #7c8494; --dim: #545b69; --accent: #e3a55a; --neutral: #5a6170;
-  --compute: #d4874b; --storage: #4d8ad6; --database: #c25c90; --network: #3cae9f;
-  --ai: #9870ee; --analytics: #cbb04a; --ops: #5fb06a; --other: #858b97;
+  --compute: oklch(0.72 0.11 55); --storage: oklch(0.72 0.11 250); --database: oklch(0.72 0.11 355);
+  --network: oklch(0.72 0.11 185); --ai: oklch(0.72 0.11 295); --analytics: oklch(0.72 0.11 95);
+  --ops: oklch(0.72 0.11 145); --other: oklch(0.66 0.02 260); /* one lightness and chroma: no colour shouts */
   --up: #e5534b; --down: #3fb68b; --advisor: #4fa3e0;
 }
 * { box-sizing: border-box; }
@@ -48,23 +49,26 @@ label.chk input { accent-color: var(--accent); margin: 0; }
 .legend { display: flex; gap: 12px; margin-left: auto; }
 .legend span { display: flex; align-items: center; gap: 5px; }
 .legend i { width: 9px; height: 9px; border-radius: 2px; }
+.legend { overflow: hidden; }
+.legend i.todo { background: #262b35 repeating-linear-gradient(135deg, transparent 0 2px, rgb(255 255 255 / .35) 2px 3px); }
 
-#map { position: relative; margin: 2px 8px 8px 12px; min-height: 0; }
+#map { position: relative; margin: 2px 8px 8px 12px; min-height: 0; overflow: hidden; transform-origin: 0 0; }
 .cell { position: absolute; overflow: hidden; border-radius: 2px; cursor: pointer; }
-.leaf { background: color-mix(in srgb, var(--c) 30%, var(--bg)); border: 1px solid color-mix(in srgb, var(--c) 48%, var(--bg)); padding: 3px 5px; }
-.leaf:hover { background: color-mix(in srgb, var(--c) 46%, var(--bg)); }
+/* disktree's look: no outlines, gaps separate the boxes, a box is a step lighter than its group */
+.leaf { background-color: color-mix(in oklab, var(--c) 32%, var(--bg)); padding: 3px 5px; }
+.leaf:hover { box-shadow: inset 0 0 0 1px rgb(255 255 255 / .55); }
 .leaf.tiny { padding: 0; } /* smaller than its padding, a box would render bigger than its slot and spill over */
-.leaf.more { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--c) 20%, var(--bg)) 0 4px,
-  color-mix(in srgb, var(--c) 30%, var(--bg)) 4px 8px); }
+.leaf.more { background-color: color-mix(in oklab, var(--c) 18%, var(--bg)); }
 .leaf.more .n { color: var(--muted); }
-.group { background: color-mix(in srgb, var(--c) 9%, var(--bg)); border: 1px solid color-mix(in srgb, var(--c) 30%, var(--bg));
-  border-top: 2px solid color-mix(in srgb, var(--c) 75%, var(--bg)); }
-.gh { display: flex; justify-content: space-between; gap: 6px; padding: 1px 5px; height: 17px; white-space: nowrap; }
-.gh .n { color: var(--text); overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
+/* the boxes Worth a look's to-dos are about: the map is the to-do list */
+.leaf.todo { background-image: repeating-linear-gradient(135deg, transparent 0 6px, rgb(255 255 255 / .10) 6px 8px); }
+.group { background-color: color-mix(in oklab, var(--c) 13%, var(--bg)); box-shadow: inset 0 2px 0 color-mix(in oklab, var(--c) 85%, var(--bg)); }
+.gh { display: flex; justify-content: space-between; gap: 6px; padding: 2px 5px 0; height: 19px; white-space: nowrap; }
+.gh .n { color: var(--text); overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
 .gh .v { color: var(--muted); font-size: 10.5px; }
 .leaf .n { color: #e3e6ec; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .leaf .v { color: color-mix(in srgb, var(--c) 45%, #9aa1ad); font-size: 10.5px; white-space: nowrap; }
-.cell.sel { outline: 2px solid #f1f3f7; outline-offset: -2px; }
+.cell.sel { outline: 2px solid var(--accent); outline-offset: -2px; }
 .leaf.sel { z-index: 2; } /* not groups: their boxes are siblings on top, and a raised group would cover them */
 .empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 14px; }
 
@@ -322,9 +326,11 @@ function place(el, r, gap) {
   el.style.left = r.x + gap + "px"; el.style.top = r.y + gap + "px";
   el.style.width = Math.max(0, r.w - gap * 2) + "px"; el.style.height = Math.max(0, r.h - gap * 2) + "px";
 }
+let drawn = []; // the nodes the last render() drew, in drawing order (largest first within each parent)
 function cell(cls, n, r, gap) {
   const el = document.createElement("div");
-  el.className = "cell " + cls; el._n = n; n._el = el;
+  el.className = "cell " + cls + (isTodo(n) ? " todo" : ""); el._n = n; n._el = el;
+  drawn.push(n);
   el.style.setProperty("--c", color(n));
   place(el, r, gap);
   return el;
@@ -364,6 +370,7 @@ function drawGroup(frag, r) {
 function zoomed() { return state.zoom === null ? undefined : root.children.find(g => g.key === state.zoom); }
 
 function render() {
+  drawn = [];
   const base = zoomed() || root;
   const W = map.clientWidth, H = map.clientHeight, frag = document.createDocumentFragment();
   if (!base.children.length) {
@@ -396,9 +403,10 @@ function renderChrome(base) {
     ? `<span class="cur">all ${esc(DIM[A].many)}</span>`
     : `<a data-up>all ${esc(DIM[A].many)}</a><span>/</span><span class="cur">${esc(base.name)}</span>`);
   const leaves = root.children.reduce((s, g) => s + g.children.length, 0);
-  const legend = state.change
+  const todoKey = marks().size ? '<span><i class="todo"></i>to-do</span>' : ""; // first, so a narrow legend clips "Other" instead
+  const legend = todoKey + (state.change
     ? [["--down", "down"], ["--neutral", "flat"], ["--up", "up / new"]].map(([c, l]) => `<span><i style="background:var(${c})"></i>${l}</span>`).join("")
-    : CATS.map(([k, l]) => `<span><i style="background:var(--${k})"></i>${l}</span>`).join("");
+    : CATS.map(([k, l]) => `<span><i style="background:var(--${k})"></i>${l}</span>`).join(""));
   const fallback = totalsOnly()
     ? `<span title="too many resources for a daily series: each resource has one total per period">period totals for ${esc(DATA.resource_fallback.join(", "))}</span>` : "";
   const untagged = state.view === "tag" && !state.filter
@@ -556,6 +564,23 @@ function hintText(h) {
   if (h.kind === "steady") return `steady at about ${money(h.monthly)}/mo on ${h.meters.join(", ")}: a reservation or savings plan could cut it`;
   return h.reason || "";
 }
+
+// the boxes the to-dos in Worth a look are about, in the view each row jumps to: hatched on the map
+const _marks = {};
+function marks() {
+  if (_marks[state.view]) return _marks[state.view];
+  const m = new Set();
+  for (const x of worthALook()) {
+    const h = x.h;
+    if (x.view !== state.view) continue;
+    if (h.kind === "pit") m.add(h.service + "\u0000" + h.meter);
+    else if (h.kind === "steady") for (const meter of h.meters) m.add(h.service + "\u0000" + meter);
+    else if (h.kind === "idle") for (const r of h.resources) m.add(r.group + "\u0000" + r.id);
+    else if (h.kind === "devtest") m.add(h.group + "\u0000*");
+  }
+  return (_marks[state.view] = m);
+}
+const isTodo = n => n.kind === "leaf" && !n.more && (marks().has(n.parent.key + "\u0000" + n.key) || marks().has(n.parent.key + "\u0000*"));
 
 // ---------- interaction
 function showView(v) {
