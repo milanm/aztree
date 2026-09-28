@@ -203,6 +203,14 @@ class QueryTest(unittest.TestCase):
         self.assertTrue(any("qpu" in line.lower() and "2" in line for line in lines))
 
 
+    def test_a_tag_grouping_goes_out_as_given(self):
+        send = FakeSend(page(self.COLS, []))
+        aztree.query(client(send), "/subscriptions/s1", "2026-07-01", "2026-08-29",
+                     [{"type": "TagKey", "name": "env"}, "ServiceName"], "ActualCost")
+        self.assertEqual(send.calls[0]["body"]["dataset"]["grouping"],
+                         [{"type": "TagKey", "name": "env"}, {"type": "Dimension", "name": "ServiceName"}])
+
+
 class ListSubscriptionsTest(unittest.TestCase):
     def test_lists_every_page_from_arm(self):
         def subs_page(items, nxt=None):
@@ -224,20 +232,31 @@ TODAY = aztree.dt.date(2026, 9, 29)  # with days=3 the window is Sep 22..27 (end
 
 
 class Router:
-    """Fake Cost Management: answers each query from `tables[(dim1, dim2)][scope]`, a list of
-    (usage_date, value1, value2, cost, currency, cost_usd) tuples."""
+    """Fake ARM. Cost Management queries are answered from `tables[(dim1, dim2)][scope]`, a list of
+    (usage_date, value1, value2, cost, currency, cost_usd) tuples; a tag grouping is keyed ("tag:KEY", dim2).
+    Tag names, forecasts and Resource Graph answer from `tag_names`, `forecasts` and `findings`, empty by default."""
 
-    def __init__(self, tables, explode=(), reject_usd=False, reject=(), reject_for=None, fail=None):
+    def __init__(self, tables, explode=(), reject_usd=False, reject=(), reject_for=None, fail=None,
+                 tag_names=None, forecasts=None, findings=None):
         self.tables, self.explode = tables, explode
         self.reject = set(reject) | ({"CostUSD"} if reject_usd else set())
         self.reject_for = reject_for or {}  # scope -> aggregations only that scope refuses
         self.fail = fail or {}  # (dim1, dim2) -> error message answered with HTTP 400
-        self.bodies, self.calls = [], []
+        self.tag_names = tag_names or {}  # subscription id -> [(tag name, resource count)], or an HTTP status
+        self.forecasts = forecasts or {}  # scope -> [(date, "Actual" or "Forecast", cost, currency)], or an HTTP status
+        self.findings = findings  # Resource Graph pages (lists of findings), or an HTTP status
+        self.bodies, self.calls, self.other = [], [], []
 
     def __call__(self, method, url, data, headers):
+        if "/tagNames" in url:
+            return self.tag_names_page(url)
+        if "/Microsoft.CostManagement/forecast" in url:
+            return self.forecast_page(url, json.loads(data))
+        if "/Microsoft.ResourceGraph/" in url:
+            return self.graph_page(json.loads(data), headers)
         body = json.loads(data)
         self.bodies.append(body)
-        dims = tuple(g["name"] for g in body["dataset"].get("grouping", []))
+        dims = tuple(("tag:" if g["type"] == "TagKey" else "") + g["name"] for g in body["dataset"].get("grouping", []))
         aggs = [a["name"] for a in body["dataset"]["aggregation"].values()]
         scope = url.split("/providers/Microsoft.CostManagement")[0][len(aztree.ARM):]
         self.calls.append((scope, dims, aggs))
@@ -251,12 +270,13 @@ class Router:
             return page(["Cost"], [], next_link=url.split("&")[0] + "&$skiptoken=more")
         if not daily:  # no granularity: Azure answers one row per group, summed over the whole time period
             return self.totals(body, dims, aggs, scope)
-        cols = aggs + ["UsageDate", *dims, "Currency"]
+        tagged = bool(dims) and dims[0].startswith("tag:")  # Azure answers a tag grouping as TagKey and TagValue
+        cols = aggs + ["UsageDate", *(["TagKey", "TagValue", dims[1]] if tagged else dims), "Currency"]
         rows = []
         for date, a, b, cost, cur, usd in self.tables.get(dims, {}).get(scope, []):
             usd = usd if usd is not None else cost
             vals = {"Cost": cost, "CostUSD": usd, "PreTaxCost": cost, "PreTaxCostUSD": usd, "UsageDate": date,
-                    dims[0]: a, dims[1]: b, "Currency": cur}
+                    dims[0]: a, dims[1]: b, "Currency": cur, "TagKey": dims[0][4:], "TagValue": a}
             rows.append([vals[c] for c in cols])
         return page(cols, rows)
 
@@ -275,8 +295,38 @@ class Router:
             rows.append([vals[c] for c in cols])
         return page(cols, rows)
 
+    def tag_names_page(self, url):
+        sub = url.split("/subscriptions/")[1].split("/")[0]
+        self.other.append(("tagNames", sub))
+        got = self.tag_names.get(sub, [])
+        if isinstance(got, int):
+            return error(got, "Failed", "no tags for you")
+        value = [{"tagName": n, "count": {"type": "Total", "value": c}, "values": []} for n, c in got]
+        return 200, {}, json.dumps({"value": value}).encode()
 
-RID = "/subscriptions/aaaa-1/resourcegroups/rg-app/providers/microsoft.web/sites/shop"
+    def forecast_page(self, url, body):
+        scope = url.split("/providers/Microsoft.CostManagement")[0][len(aztree.ARM):]
+        self.other.append(("forecast", scope, body))
+        got = self.forecasts.get(scope, [])
+        if isinstance(got, int):
+            return error(got, "Failed", "no forecast")
+        col = next(iter(body["dataset"]["aggregation"].values()))["name"]
+        return page([col, "UsageDate", "CostStatus", "Currency"], [[c, d, s, cur] for d, s, c, cur in got])
+
+    def graph_page(self, body, headers):
+        self.other.append(("graph", body, headers["Authorization"]))
+        if isinstance(self.findings, int):
+            return error(self.findings, "AuthorizationFailed", "no Resource Graph for you")
+        pages = self.findings or [[]]
+        i = int(body["options"].get("$skipToken") or 0)
+        out = {"totalRecords": sum(map(len, pages)), "count": len(pages[i]), "data": pages[i],
+               "facets": [], "resultTruncated": "false"}
+        if i + 1 < len(pages):
+            out["$skipToken"] = str(i + 1)
+        return 200, {}, json.dumps(out).encode()
+
+
+RID ="/subscriptions/aaaa-1/resourcegroups/rg-app/providers/microsoft.web/sites/shop"
 ONE_SUB = {
     ("ServiceName", "Meter"): {"/subscriptions/aaaa-1": [
         (20260922, "Storage", "Hot LRS Data Stored", 1.0, "USD", None),
@@ -296,10 +346,14 @@ PROD = {"id": "aaaa-1", "name": "acme-prod"}
 DEV = {"id": "bbbb-2", "name": "acme-dev"}
 
 
-def fetch(tables, targets=(PROD,), **kw):
-    router = Router(tables, **{k: kw.pop(k) for k in ("explode", "reject_usd", "reject", "reject_for", "fail") if k in kw})
+ROUTER_ARGS = ("explode", "reject_usd", "reject", "reject_for", "fail", "tag_names", "forecasts", "findings")
+
+
+def fetch(tables, targets=(PROD,), log=None, **kw):
+    """aztree.fetch() against the fake ARM. Router options go to the Router, the rest (tag=, graph=) to fetch()."""
+    router = Router(tables, **{k: kw.pop(k) for k in ROUTER_ARGS if k in kw})
     data = aztree.fetch(client(router), [aztree.subscription_target(t) for t in targets], 3, "ActualCost",
-                        advisor=False, log=lambda *a: None, today=TODAY)
+                        advisor=False, log=log or (lambda *a: None), today=TODAY, **kw)
     return data, router
 
 
@@ -391,6 +445,72 @@ class FetchTest(unittest.TestCase):
         self.assertEqual(aggs[0], ["Cost", "CostUSD"])
         self.assertTrue(all(a == ["Cost"] for a in aggs[1:]))
         self.assertIn(("Storage", "Hot LRS Data Stored"), rows_of(data, "service"))
+
+
+class TagViewTest(unittest.TestCase):
+    TAGS = {"aaaa-1": [("hidden-link: /app-insights-resource-id", 300), ("environment", 109), ("owner", 40)]}
+    TAGGED = {**ONE_SUB, ("tag:environment", "ServiceName"): {"/subscriptions/aaaa-1": [
+        (20260922, "prod", "Storage", 1.0, "USD", None),
+        (20260927, None, "Storage", 1.5, "USD", None),  # untagged spend: Azure sends TagValue null
+        (20260927, "", "Storage", 0.5, "USD", None),
+        (20260925, "prod", "Azure App Service", 5.0, "USD", None),
+    ]}}
+
+    def choose(self, tags, targets=(PROD,), wanted=None):
+        router = Router({}, tag_names=tags)
+        got = aztree.choose_tag(client(router), [aztree.subscription_target(t) for t in targets], wanted, log=lambda *a: None)
+        return got, router
+
+    def test_the_tag_on_most_resources_is_picked(self):
+        self.assertEqual(self.choose(self.TAGS)[0], "environment")  # Azure's hidden-* tags don't count
+
+    def test_counts_add_up_across_subscriptions_whatever_the_case(self):
+        tags = {"aaaa-1": [("env", 10), ("owner", 30)], "bbbb-2": [("Env", 25)]}
+        self.assertEqual(self.choose(tags, targets=(PROD, DEV))[0], "env")
+
+    def test_the_tag_flag_wins_without_asking_azure(self):
+        got, router = self.choose(self.TAGS, wanted="costcenter")
+        self.assertEqual((got, router.other), ("costcenter", []))
+
+    def test_other_scopes_need_the_tag_flag(self):
+        scope = aztree.scope_target("/providers/Microsoft.Billing/billingAccounts/1")
+        self.assertIsNone(aztree.choose_tag(client(Router({})), [scope], None, log=lambda *a: None))
+
+    def test_no_tags_means_no_tag_view(self):
+        data, _ = fetch(ONE_SUB)
+        self.assertNotIn("tag", data["views"])
+
+    def test_a_tag_names_error_is_logged_and_means_no_tag_view(self):
+        lines = []
+        data, _ = fetch(ONE_SUB, tag_names={"aaaa-1": 403}, log=lines.append)
+        self.assertNotIn("tag", data["views"])
+        self.assertTrue(any("tags" in line and "403" in line for line in lines), lines)
+
+    def test_the_tag_view_splits_the_bill_by_value(self):
+        data, router = fetch(self.TAGGED, tag_names=self.TAGS)
+        view = data["views"]["tag"]
+        self.assertEqual((view["dims"], view["tag"], view["names"]), (["TagValue", "ServiceName"], "environment", {}))
+        rows = rows_of(data, "tag")
+        self.assertEqual(sum(rows[("", "Storage")]), 2.0)  # null and empty values are both untagged
+        self.assertEqual(sum(rows[("prod", "Azure App Service")]), 5.0)
+        bill = sum(sum(d) for d in rows_of(data, "service").values())
+        self.assertEqual(sum(sum(d) for d in rows.values()), bill)
+        body = next(b for b in router.bodies if b["dataset"]["grouping"][0]["type"] == "TagKey")
+        self.assertEqual(body["dataset"]["grouping"],
+                         [{"type": "TagKey", "name": "environment"}, {"type": "Dimension", "name": "ServiceName"}])
+
+    def test_the_tag_flag_skips_the_tag_names_call(self):
+        data, router = fetch(self.TAGGED, tag="environment")
+        self.assertIn("tag", data["views"])
+        self.assertFalse([c for c in router.other if c[0] == "tagNames"])
+
+    def test_a_failed_tag_query_drops_the_view_but_not_the_run(self):
+        lines = []
+        data, _ = fetch(ONE_SUB, tag="environment", fail={("tag:environment", "ServiceName"): "Invalid tag key"},
+                        log=lines.append)
+        self.assertNotIn("tag", data["views"])
+        self.assertIn(("Storage", "Hot LRS Data Stored"), rows_of(data, "service"))
+        self.assertTrue(any("tag view" in line for line in lines), lines)
 
 
 # (service, meter, words expected in the reason, or None for "no flag"). Meter names are from real bills.

@@ -236,7 +236,7 @@ def query(az, scope, start, end, groupings, metric, aggs=("Cost", "CostUSD"), ma
     Returns every row of every page as a dict keyed by column name."""
     dataset = {
         "aggregation": {f"total{a}": {"name": a, "function": "Sum"} for a in aggs},
-        "grouping": [{"type": "Dimension", "name": g} for g in groupings],
+        "grouping": [g if isinstance(g, dict) else {"type": "Dimension", "name": g} for g in groupings],
     }
     if granularity:
         dataset["granularity"] = granularity
@@ -261,6 +261,35 @@ def query(az, scope, start, end, groupings, metric, aggs=("Cost", "CostUSD"), ma
     if getattr(az, "verbose", False):
         az.log(f"    ({pages} page{'s' if pages != 1 else ''}, {len(rows)} rows)")
     return rows
+
+
+TAG_NAMES_API = "2021-04-01"
+
+
+def choose_tag(az, targets, wanted, log=print):
+    """The tag the tag view splits the bill by: --tag, or else the tag on the most resources across the
+    subscriptions. Azure's own hidden-* tags (hidden-link, hidden-title) don't count. None when there's none."""
+    if wanted:
+        return wanted
+    counts, spelling = Counter(), {}
+    for t in targets:
+        if not t["scope"].lower().startswith("/subscriptions/"):
+            continue  # tag names are listed per subscription; other scopes need --tag
+        url = f"{t['scope']}/tagNames?api-version={TAG_NAMES_API}"
+        try:
+            while url:
+                page = az.call("GET", url, tenant=t.get("tenant"))
+                for item in page.get("value", []):
+                    name = item.get("tagName") or ""
+                    if name and not name.lower().startswith("hidden-"):
+                        spelling.setdefault(name.lower(), name)
+                        counts[name.lower()] += (item.get("count") or {}).get("value") or 0
+                url = page.get("nextLink")
+        except AzureError as e:
+            log(f"  {t['name']}: couldn't list its tags (HTTP {e.status}); pass --tag KEY to choose one")
+    if not counts:
+        return None
+    return spelling[min(counts, key=lambda k: (-counts[k], k))]  # most resources, then by name
 
 
 # ---------------------------------------------------------------- reading costs
@@ -294,17 +323,18 @@ def last_full_day(today=None):
     return (today or dt.date.today()) - dt.timedelta(2)
 
 
-def fetch(az, targets, days, metric, advisor=True, log=print, today=None):
+def fetch(az, targets, days, metric, advisor=True, log=print, today=None, tag=None):
     end = last_full_day(today)
     start = end - dt.timedelta(2 * days - 1)  # current window + previous window, for the "vs prev" deltas
     dates = [(start + dt.timedelta(i)).isoformat() for i in range(2 * days)]
     index = {d.replace("-", ""): i for i, d in enumerate(dates)}
-    raw = {v: [] for v in VIEWS}  # (key, day index, cost, cost in USD), folded once the currency is known
+    raw = {v: [] for v in [*VIEWS, "tag"]}  # (key, day index, cost, cost in USD), folded once the currency is known
     names = {v: {} for v in VIEWS}
     columns = {}  # target id -> cost columns that target accepts, best first; every subscription starts at the top
     subs, fallback = [], []
     twins = Counter(t["name"] for t in targets)  # "Pay-As-You-Go" twice needs the id to tell them apart
     targets = [{**t, "name": f"{t['name']} ({t['id'][:8]})"} if twins[t["name"]] > 1 else t for t in targets]
+    tag = choose_tag(az, targets, tag, log)
 
     def run(target, groupings, start=None, end=None, **kw):
         aggs = columns.setdefault(target["id"], list(AGGREGATIONS))
@@ -355,6 +385,14 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None):
         log(f"  {t['name']}: regions ...")
         for r in run(t, VIEWS["region"]):
             add("region", ((r.get("ResourceLocation") or "").lower(), service_of(r)), r)
+        if tag:
+            log(f"  {t['name']}: tag {tag} ...")
+            try:
+                for r in run(t, [{"type": "TagKey", "name": tag}, "ServiceName"]):
+                    add("tag", (r.get("TagValue") or "", service_of(r)), r)  # no value: spend on untagged resources
+            except AzureError as e:
+                log(f"  {t['name']}: skipped the tag view ({e})")
+                tag = None  # without this target's part it wouldn't add up to the bill
         subs.append({"id": t["id"], "name": t["name"], "currency": next((c for c, _ in currencies.most_common() if c), None)})
 
     recs, advisor_error = None, None
@@ -377,9 +415,13 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None):
     if len(found) > 1 and not usd:
         log("  warning: these subscriptions bill in different currencies and Azure won't convert them; totals mix currencies")
     log(f"  done: {az.requests} requests (Cost Management queries are free)")
+    views = {v: {"dims": dims, "names": names[v], "rows": fold(raw[v], len(dates), usd)} for v, dims in VIEWS.items()}
+    if tag:
+        views["tag"] = {"dims": ["TagValue", "ServiceName"], "names": {}, "tag": tag,
+                        "rows": fold(raw["tag"], len(dates), usd)}
     return {
         "days": dates, "split": days,
-        "views": {v: {"dims": dims, "names": names[v], "rows": fold(raw[v], len(dates), usd)} for v, dims in VIEWS.items()},
+        "views": views,
         "currency": "USD" if usd or not found else min(found),
         "subscriptions": subs, "resource_fallback": fallback,
         "advisor": recs, "advisor_error": advisor_error, "demo": False,
