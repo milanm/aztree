@@ -1,5 +1,7 @@
 # aztree
 
+[![PyPI](https://img.shields.io/pypi/v/aztree?label=PyPI)](https://pypi.org/project/aztree/) [![NuGet](https://img.shields.io/nuget/v/aztree?label=NuGet)](https://www.nuget.org/packages/aztree)
+
 **Where did my Azure money go?** aztree reads your Azure costs and draws them as a treemap: big box, big cost.
 
 ![aztree showing a demo Azure bill as a treemap](https://raw.githubusercontent.com/milanm/aztree/main/docs/screenshot.png)
