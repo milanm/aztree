@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import Counter
 
@@ -215,6 +216,20 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None):
             add("region", ((r.get("ResourceLocation") or "").lower(), r["ServiceName"]), r)
         subs.append({"id": t["id"], "name": t["name"], "currency": next((c for c, _ in currencies.most_common() if c), None)})
 
+    recs, advisor_error = None, None
+    if advisor:
+        recs = []
+        for t in targets:
+            if not t["scope"].lower().startswith("/subscriptions/"):
+                continue
+            log(f"  {t['name']}: Advisor ...")
+            try:
+                recs += advisor_recs(az, t)
+            except AzureError as e:  # Advisor needs Reader; cost data alone is still worth a page
+                advisor_error = str(e)
+                log(f"  {t['name']}: skipped Advisor ({e}). Reader on the subscription fixes that; --no-advisor hides this.")
+        recs.sort(key=lambda r: -(r["annual_savings"] or -1))
+
     found = {s["currency"] for s in subs if s["currency"]}
     usd = len(found) > 1 and "CostUSD" in aggs
     if len(found) > 1 and not usd:
@@ -224,7 +239,8 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None):
         "days": dates, "split": days,
         "views": {v: {"dims": dims, "names": names[v], "rows": fold(raw[v], len(dates), usd)} for v, dims in VIEWS.items()},
         "currency": "USD" if usd or not found else min(found),
-        "subscriptions": subs, "resource_fallback": fallback, "advisor": None, "demo": False,
+        "subscriptions": subs, "resource_fallback": fallback,
+        "advisor": recs, "advisor_error": advisor_error, "demo": False,
     }
 
 
@@ -241,6 +257,68 @@ def fold(entries, n, usd):
 def pack(rows):
     out = [{"k": list(k), "d": [round(v, 4) for v in d]} for k, d in rows.items()]
     return [r for r in out if abs(sum(r["d"])) >= 0.005]
+
+
+# ---------------------------------------------------------------- worth a look
+
+# Known money pits: (service pattern, meter pattern, why). First match wins. Shared with the viewer's
+# "worth a look" panel, so the patterns must mean the same in Python and JavaScript.
+OLD_VM_SIZES = r"^(?:(?:Basic[ ._])?A\d+m?(?: v2)?|DS?\d+(?: v2)?|F\d+s?)(?:$|/| Low Priority| Spot)"
+PITS = [
+    (r"^(?:Log Analytics|Azure Monitor)$", r"Data Ingestion",
+     "Log Analytics ingestion — trim noisy tables, use Basic logs, or a commitment tier past 100 GB/day"),
+    (r"^Bandwidth$", r"Data Transfer Out", "data transfer out — keep traffic in one region, cache at the edge"),
+    (r"^NAT Gateway$", r"Data Processed", "NAT data processing — service or private endpoints for Storage, SQL and ACR skip it"),
+    (r"^Azure Firewall$", r"Data Processed|Premium", "Azure Firewall — processing and Premium add up; route only what needs inspection"),
+    (r"^Virtual Network$", r"^Basic .*Public IP", "Basic public IPs — the Basic SKU retired on 30 Sep 2025, move to Standard"),
+    (r"^Virtual Network$", r"Public IP|IP Address Hours", "public IPs — billed per hour each; release the ones nothing uses"),
+    (r"^Storage$", r"Snapshot", "disk snapshots — prune old ones; incremental snapshots on Standard storage cost less"),
+    (r"^Virtual Machines$", OLD_VM_SIZES, "previous-gen VM sizes — current generations cost less for the same work"),
+    (r"^Azure App Service$", r"^P\d+ ?v2 App", "Premium v2 App Service plans — Premium v3 gives more per dollar and can be reserved"),
+    (r"", r"Extended Security Update", "Extended Security Updates — upgrade the OS or SQL version to stop paying for them"),
+]
+
+
+def pit(service, meter):
+    return next((why for s, m, why in PITS if re.search(s, service) and re.search(m, meter)), None)
+
+
+def advisor_recs(az, target):
+    """Azure Advisor's cost recommendations for one subscription, one per (kind, resource, SKU).
+    Advisor lists each reservation once per term and look-back period; keep the biggest saving."""
+    flt = urllib.parse.quote("Category eq 'Cost'")
+    url = f"{target['scope']}/providers/Microsoft.Advisor/recommendations?api-version=2023-01-01&$filter={flt}"
+    best = {}
+    while url:
+        page = az.call("GET", url)
+        for item in page.get("value", []):
+            key, rec = advisor_rec(item.get("properties", {}), target)
+            if key not in best or (rec["annual_savings"] or 0) > (best[key]["annual_savings"] or 0):
+                best[key] = rec
+        url = page.get("nextLink")
+    return sorted(best.values(), key=lambda r: -(r["annual_savings"] or -1))
+
+
+def advisor_rec(p, target):
+    ext = p.get("extendedProperties") or {}
+    short = p.get("shortDescription") or {}
+    resource = ((p.get("resourceMetadata") or {}).get("resourceId") or "").lower()
+    savings = ext.get("annualSavingsAmount")
+    name = p.get("impactedValue") or resource.rsplit("/", 1)[-1]
+    rec = {
+        "problem": short.get("problem", ""),
+        "solution": short.get("solution", ""),
+        "impact": p.get("impact"),
+        "resource": resource,
+        "resource_name": target["name"] if name.lower() == target["id"].lower() else name,
+        "resource_type": p.get("impactedField"),
+        "sku": ext.get("displaySKU") or ext.get("sku") or ext.get("targetSku"),
+        "term": ext.get("term"),
+        "annual_savings": float(savings) if savings not in (None, "") else None,
+        "currency": ext.get("savingsCurrency"),
+        "subscription": target["name"],
+    }
+    return (p.get("recommendationTypeId"), resource, rec["sku"]), rec
 
 
 # ---------------------------------------------------------------- auth and subscriptions

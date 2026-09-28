@@ -347,6 +347,154 @@ class FetchTest(unittest.TestCase):
         self.assertIn(("Storage", "Hot LRS Data Stored"), rows_of(data, "service"))
 
 
+# (service, meter, words expected in the reason, or None for "no flag"). Meter names are from real bills.
+PIT_CASES = [
+    ("Log Analytics", "Analytics Logs Data Ingestion", "Log Analytics ingestion"),
+    ("Azure Monitor", "Basic Logs Data Ingestion", "Log Analytics ingestion"),
+    ("Azure Monitor", "Standard Web Test Execution", None),
+    ("Bandwidth", "Standard Data Transfer Out", "data transfer"),
+    ("Bandwidth", "Inter Continent Data Transfer Out - NAM or EU To Any", "data transfer"),
+    ("Bandwidth", "Data Transfer In", None),
+    ("NAT Gateway", "Standard Data Processed", "NAT"),
+    ("NAT Gateway", "Standard Gateway", None),
+    ("Azure Firewall", "Standard Data Processed", "Firewall"),
+    ("Azure Firewall", "Premium Deployment", "Firewall"),
+    ("Azure Firewall", "Standard Deployment", None),
+    ("Virtual Network", "Basic IPv4 Static Public IP", "Basic public IP"),
+    ("Virtual Network", "Standard IPv4 Static Public IP", "public IPs"),
+    ("Virtual Network", "Standard Private Endpoint", None),
+    ("Storage", "LRS Snapshots", "snapshots"),
+    ("Storage", "P10 LRS Disk", None),
+    ("Virtual Machines", "D2 v2", "previous-gen"),
+    ("Virtual Machines", "D2 v2/DS2 v2", "previous-gen"),
+    ("Virtual Machines", "DS3 v2 Spot", "previous-gen"),
+    ("Virtual Machines", "D11 v2", "previous-gen"),
+    ("Virtual Machines", "A1 v2", "previous-gen"),
+    ("Virtual Machines", "Basic.A2", "previous-gen"),
+    ("Virtual Machines", "F4", "previous-gen"),
+    ("Virtual Machines", "F2s", "previous-gen"),
+    ("Virtual Machines", "F2s v2", None),
+    ("Virtual Machines", "D4s v5", None),
+    ("Virtual Machines", "D2 v3", None),
+    ("Virtual Machines", "D2as v4", None),
+    ("Virtual Machines", "B2s", None),
+    ("Azure App Service", "P1 v2 App", "Premium v2"),
+    ("Azure App Service", "P2v2 App", "Premium v2"),
+    ("Azure App Service", "P1 v3 App", None),
+    ("Azure App Service", "P0v3 App", None),
+    ("Windows Server", "Extended Security Updates - Windows Server 2012", "Extended Security Updates"),
+    ("SQL Database", "vCore", None),
+]
+
+
+class PitsTest(unittest.TestCase):
+    def test_rules_against_real_meter_names(self):
+        for service, meter, expected in PIT_CASES:
+            with self.subTest(service=service, meter=meter):
+                why = aztree.pit(service, meter)
+                if expected is None:
+                    self.assertIsNone(why)
+                else:
+                    self.assertIsNotNone(why)
+                    self.assertIn(expected.lower(), why.lower())
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_javascript_reads_the_rules_the_same_way(self):
+        # The viewer runs the same patterns with JavaScript's RegExp; both engines must agree.
+        script = (
+            "const [pits, cases] = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
+            "const rules = pits.map(([s, m, why]) => [new RegExp(s), new RegExp(m), why]);"
+            "console.log(JSON.stringify(cases.map(([s, m]) => { const r = rules.find(([rs, rm]) => rs.test(s) && rm.test(m)); return r ? r[2] : null; })));"
+        )
+        payload = json.dumps([aztree.PITS, [[s, m] for s, m, _ in PIT_CASES]])
+        out = aztree.subprocess.run(["node", "-e", script], input=payload, capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(json.loads(out.stdout), [aztree.pit(s, m) for s, m, _ in PIT_CASES])
+
+
+def advisor_item(problem, resource, value, sku=None, term=None, savings=None, rtype="t-1", field="Microsoft.Subscriptions/subscriptions"):
+    ext = {"annualSavingsAmount": str(savings), "savingsCurrency": "USD"} if savings is not None else {}
+    if sku:
+        ext["displaySKU"] = sku
+    if term:
+        ext["term"] = term
+    return {"properties": {"category": "Cost", "impact": "High", "impactedField": field, "impactedValue": value,
+                           "recommendationTypeId": rtype, "shortDescription": {"problem": problem, "solution": problem},
+                           "extendedProperties": ext, "resourceMetadata": {"resourceId": resource}}}
+
+
+class AdvisorTest(unittest.TestCase):
+    SUB = "/subscriptions/aaaa-1"
+
+    def recs(self, items):
+        send = FakeSend((200, {}, json.dumps({"value": items}).encode()))
+        return aztree.advisor_recs(client(send), aztree.subscription_target(PROD)), send
+
+    def test_reads_cost_recommendations_for_the_subscription(self):
+        _, send = self.recs([])
+        url = send.calls[0]["url"]
+        self.assertIn("/subscriptions/aaaa-1/providers/Microsoft.Advisor/recommendations", url)
+        self.assertIn("Category%20eq%20%27Cost%27", url)
+
+    def test_reservation_variants_collapse_to_the_best_one(self):
+        cosmos = "Consider Cosmos DB reserved instance"
+        items = [advisor_item(cosmos, self.SUB, "aaaa-1", "100 RU/s", term, s, rtype="cosmos")
+                 for term, s in (("P1Y", 747), ("P3Y", 1182), ("P1Y", 787), ("P3Y", 1143))]
+        items.append(advisor_item("Consider SQL PaaS DB reserved instance", self.SUB, "aaaa-1", "SQL GP Gen5", "P1Y", 4396, rtype="sql"))
+        recs, _ = self.recs(items)
+        self.assertEqual([(r["sku"], r["annual_savings"], r["term"]) for r in recs],
+                         [("SQL GP Gen5", 4396.0, "P1Y"), ("100 RU/s", 1182.0, "P3Y")])
+
+    def test_resource_level_recommendation(self):
+        rid = "/subscriptions/aaaa-1/resourceGroups/RG-App/providers/Microsoft.Compute/virtualMachines/vm1"
+        recs, _ = self.recs([advisor_item("Right-size or shutdown underutilized virtual machines", rid, "vm1",
+                                          savings=840, field="Microsoft.Compute/virtualMachines")])
+        rec = recs[0]
+        self.assertEqual(rec["resource"], rid.lower())
+        self.assertEqual(rec["resource_name"], "vm1")
+        self.assertEqual(rec["subscription"], "acme-prod")
+        self.assertEqual(rec["currency"], "USD")
+
+    def test_subscription_level_recommendation_is_named_after_the_subscription(self):
+        recs, _ = self.recs([advisor_item("Consider a savings plan", self.SUB, "aaaa-1", "Compute_Savings_Plan", "P1Y", 2947)])
+        self.assertEqual(recs[0]["resource_name"], "acme-prod")
+
+    def test_no_savings_figure_sorts_last(self):
+        recs, _ = self.recs([advisor_item("Disable health probes", "/x", "fd", savings=None),
+                             advisor_item("Buy reservation", self.SUB, "aaaa-1", "sku", "P1Y", 10)])
+        self.assertEqual([r["annual_savings"] for r in recs], [10.0, None])
+
+    def test_fetch_survives_missing_advisor_access(self):
+        router = Router(ONE_SUB)
+        real = router.__call__
+
+        def send(method, url, data, headers):
+            if "Microsoft.Advisor" in url:
+                return error(403, "AuthorizationFailed", "no access to Advisor")
+            return real(method, url, data, headers)
+
+        lines = []
+        data = aztree.fetch(client(send), [aztree.subscription_target(PROD)], 3, "ActualCost", advisor=True,
+                            log=lines.append, today=TODAY)
+        self.assertEqual(data["advisor"], [])
+        self.assertIn("403", data["advisor_error"])
+        self.assertTrue(any("Advisor" in line for line in lines))
+        self.assertIn(("Storage", "Hot LRS Data Stored"), rows_of(data, "service"))
+
+    def test_fetch_collects_advisor_when_asked(self):
+        router = Router(ONE_SUB)
+
+        def send(method, url, data, headers):
+            if "Microsoft.Advisor" in url:
+                return 200, {}, json.dumps({"value": [advisor_item("Buy reservation", self.SUB, "aaaa-1", "sku", "P1Y", 10)]}).encode()
+            return router(method, url, data, headers)
+
+        data = aztree.fetch(client(send), [aztree.subscription_target(PROD)], 3, "ActualCost", advisor=True,
+                            log=lambda *a: None, today=TODAY)
+        self.assertEqual(len(data["advisor"]), 1)
+        self.assertIsNone(data["advisor_error"])
+
+
 class ExplainTest(unittest.TestCase):
     def test_403_mentions_cost_management_reader(self):
         self.assertIn("Cost Management Reader", aztree.explain(aztree.AzureError(403, "denied")))
