@@ -6,17 +6,122 @@
 
 Needs a logged-in Azure CLI (`az login`), or a token in AZURE_ACCESS_TOKEN. No other dependencies.
 """
+import json
 import os
 import shutil
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 
 ARM = "https://management.azure.com"
+API_VERSION = "2025-03-01"  # Microsoft.CostManagement/query
+MAX_TRIES = 8  # per request, when Cost Management throttles us
 
 
 def die(msg):
     print(f"\naztree: {msg}", file=sys.stderr)
     sys.exit(1)
+
+
+# ---------------------------------------------------------------- Azure REST client
+
+class AzureError(Exception):
+    def __init__(self, status, message):
+        super().__init__(f"HTTP {status}: {message}")
+        self.status = status
+
+
+class TooManyPages(Exception):
+    pass
+
+
+def http_send(method, url, data, headers):
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return r.status, dict(r.headers), r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers), e.read()
+
+
+def retry_after(headers):
+    """Cost Management throttles per scope, per client type and per QPU, each with its own
+    *-retry-after header. Wait for the longest one."""
+    waits = [int(v) for k, v in headers.items() if k.lower().endswith("retry-after") and str(v).strip().isdigit()]
+    return max(waits) if waits and max(waits) > 0 else 5
+
+
+class Azure:
+    def __init__(self, token, send=http_send, sleep=time.sleep, verbose=False, log=print):
+        self.token, self.send, self.sleep, self.verbose, self.log = token, send, sleep, verbose, log
+        self.requests = 0
+
+    def call(self, method, url, body=None):
+        url = url if url.startswith("https://") else ARM + url
+        data = json.dumps(body).encode() if body is not None else None
+        headers = {"Authorization": "Bearer " + self.token, "Content-Type": "application/json"}
+        for attempt in range(1, MAX_TRIES + 1):
+            status, resp_headers, raw = self.send(method, url, data, headers)
+            self.requests += 1
+            if self.verbose:
+                qpu = {k.lower(): v for k, v in resp_headers.items()}.get("x-ms-ratelimit-microsoft.costmanagement-qpu-consumed")
+                if qpu:
+                    self.log(f"    ({qpu} QPU consumed)")
+            if (status == 429 or status >= 500) and attempt < MAX_TRIES:
+                wait = retry_after(resp_headers)
+                self.log(f"    Azure is throttling us (HTTP {status}); waiting {wait}s ...")
+                self.sleep(wait)
+                continue
+            if status >= 400:
+                raise AzureError(status, error_message(raw))
+            return json.loads(raw) if raw else {}
+
+
+def error_message(raw):
+    try:
+        err = json.loads(raw)["error"]
+        return f"{err.get('code', '')}: {err.get('message', '')}".strip(": ")
+    except (ValueError, KeyError, TypeError):
+        return raw.decode(errors="replace")[:300] if isinstance(raw, bytes) else str(raw)[:300]
+
+
+def explain(e):
+    hints = []
+    if e.status == 401:
+        hints.append("Your token is missing or expired. Run `az login` (or refresh AZURE_ACCESS_TOKEN).")
+    if e.status == 403:
+        hints.append("You need the Cost Management Reader (or Reader) role on the subscription or scope.")
+    if e.status == 429:
+        hints.append("Cost Management kept throttling. Wait a minute and try again, or read fewer subscriptions.")
+    return f"Azure error: {e}" + ("\n  -> " + "\n  -> ".join(hints) if hints else "")
+
+
+def query(az, scope, start, end, groupings, metric, aggs=("Cost", "CostUSD"), max_pages=None):
+    """One Cost Management query at daily granularity. `start` and `end` are ISO dates, both inclusive.
+    Returns every row of every page as a dict keyed by column name."""
+    body = {
+        "type": metric,
+        "timeframe": "Custom",
+        "timePeriod": {"from": f"{start}T00:00:00Z", "to": f"{end}T23:59:59Z"},
+        "dataset": {
+            "granularity": "Daily",
+            "aggregation": {f"total{a}": {"name": a, "function": "Sum"} for a in aggs},
+            "grouping": [{"type": "Dimension", "name": g} for g in groupings],
+        },
+    }
+    url = f"{scope}/providers/Microsoft.CostManagement/query?api-version={API_VERSION}"
+    rows, pages = [], 0
+    while url:
+        pages += 1
+        if max_pages and pages > max_pages:
+            raise TooManyPages(f"more than {max_pages} pages")
+        props = az.call("POST", url, body).get("properties", {})
+        cols = [c["name"] for c in props.get("columns", [])]
+        rows += [dict(zip(cols, r)) for r in props.get("rows", [])]
+        url = props.get("nextLink")
+    return rows
 
 
 # ---------------------------------------------------------------- auth and subscriptions
@@ -40,6 +145,23 @@ def get_token(env=os.environ, run=subprocess.run, az_path=None):
     out = az_cli(["account", "get-access-token", "--resource", ARM + "/", "--query", "accessToken", "-o", "tsv"],
                  run=run, az_path=az_path)
     return out.strip()
+
+
+def list_subscriptions(az):
+    """Every subscription the token can see, straight from ARM, so AZURE_ACCESS_TOKEN works without the CLI."""
+    subs, url = [], "/subscriptions?api-version=2022-12-01"
+    while url:
+        page = az.call("GET", url)
+        subs += [{"id": s["subscriptionId"], "name": s["displayName"], "state": s["state"]} for s in page.get("value", [])]
+        url = page.get("nextLink")
+    return subs
+
+
+def current_subscription(run=subprocess.run):
+    """The subscription `az account show` points at, or None without the CLI."""
+    if not shutil.which("az"):
+        return None
+    return json.loads(az_cli(["account", "show", "--query", "{id:id, name:name}", "-o", "json"], run=run))
 
 
 def pick_subscriptions(available, wanted, all_, current):
