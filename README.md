@@ -16,7 +16,7 @@ aztree                      # your current subscription
 aztree --all                # every subscription you can see
 ```
 
-Before the first PyPI release, install from GitHub instead: `pipx install git+https://github.com/milanm/aztree`. From a clone, run `python -m aztree` without installing anything.
+From a clone, run `python -m aztree` without installing anything.
 
 The page opens in your browser. It shows the last 30 days, compared with the 30 days before. The last day is the day before yesterday, because Azure is still posting yesterday's usage.
 
