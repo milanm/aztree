@@ -1011,47 +1011,81 @@ TEMPLATE = (REPO / "aztree" / "viewer.html").read_text(encoding="utf-8")
 FAKE_DOM = r"""
 const vm = require("vm"), fs = require("fs");
 const [code, view, click] = JSON.parse(fs.readFileSync(0, "utf8"));
+const made = [], byId = {}, docOn = {}, winOn = {}, calls = [], animations = [];
 class El {
   constructor(tag) {
     Object.assign(this, { tag, children: [], dataset: {}, className: "", innerHTML: "", value: "", checked: false,
-      isConnected: true, clientWidth: 1100, clientHeight: 700, offsetWidth: 100, offsetHeight: 30, on: {} });
+      isConnected: true, clientWidth: 1100, clientHeight: 700, offsetWidth: 100, offsetHeight: 30, on: {},
+      scrollTop: 0, scrollHeight: 2000 });
     this.style = { setProperty() {} };
-    this.classList = { add() {}, remove() {}, toggle() {} };
+    const el = this, has = c => el.className.split(" ").includes(c);
+    this.classList = {  // edits className, so tests can read the classes
+      add: c => { if (!has(c)) el.className = (el.className + " " + c).trim(); },
+      remove: c => { el.className = el.className.split(" ").filter(x => x && x !== c).join(" "); },
+      toggle: (c, on) => ((on ?? !has(c)) ? el.classList.add(c) : el.classList.remove(c)),
+      contains: has,
+    };
   }
   append(...c) { this.children.push(...c); }
   replaceChildren(...c) { this.children = c; }
   addEventListener(type, fn) { (this.on[type] = this.on[type] || []).push(fn); }
-  closest() { return null; } focus() {} blur() {} click() {} dispatchEvent() {}
+  closest() { return null; } focus() {} blur() {} click() {} dispatchEvent() {} scrollIntoView() {}
+  animate(...a) { animations.push(a); return { cancel() {} }; }
 }
-const byId = {}, made = [], docOn = {};
+const body = new El("body");
 Object.assign(globalThis, {
   document: {
+    body,
     querySelector: s => byId[s] || (byId[s] = new El(s)), querySelectorAll: () => [],
     createElement: t => { const e = new El(t); made.push(e); return e; },
     createDocumentFragment: () => new El("#fragment"),
     addEventListener: (type, fn) => (docOn[type] = docOn[type] || []).push(fn),
   },
-  location: { hash: "#" + view }, history: { replaceState() {} },
+  location: { hash: "#" + view },
+  history: { state: null,
+    pushState(s, _, url) { this.state = s; calls.push(["push", s, url]); },
+    replaceState(s, _, url) { this.state = s; calls.push(["replace", s, url]); } },
+  addEventListener: (type, fn) => (winOn[type] = winOn[type] || []).push(fn),
+  matchMedia: () => ({ matches: false }),
   ResizeObserver: class { observe() {} }, requestAnimationFrame: () => 0, cancelAnimationFrame() {},
   innerWidth: 1400, innerHeight: 900,
 });
 vm.runInThisContext(code);
-if (click && typeof click === "object" && click.press) {  // {"press": "5"} presses a key
-  for (const fn of docOn.keydown || []) fn({ key: click.press, target: {}, preventDefault() {} });
-} else if (click && typeof click === "object") {  // {"map": "dblclick", "key": ""} double-clicks that group's box
-  const box = made.find(e => e.className === "cell group" && e._n.key === click.key);
-  for (const fn of byId["#map"].on[click.map] || []) fn({ target: { closest: () => box } });
-} else if (click) {  // "[data-rec]:0" clicks the first Advisor tip in the side panel
-  const [sel, value] = click.split(":");
-  const target = { closest: s => (s === sel ? { dataset: { [sel.slice(6, -1)]: value } } : null) };
-  for (const fn of byId["#side"].on.click || []) fn({ target });
+const cells = () => (byId["#map"].children[0]?.children || []).filter(e => e.className.split(" ").includes("cell"));
+const box = name => cells().filter(e => e._n && e._n.name === name).pop();
+const fire = (list, ev) => { for (const fn of list || []) fn(ev); };
+for (const a of Array.isArray(click) ? click : click ? [click] : []) {
+  if (typeof a === "string") {  // "[data-rec]:0" clicks the first Advisor tip in the side panel
+    const [sel, value] = a.split(":");
+    fire(byId["#side"].on.click, { target: { closest: s => (s === sel ? { dataset: { [sel.slice(6, -1)]: value } } : null) } });
+  } else if (a.map === "dblclick") {  // a real double click is click, click, dblclick
+    const b = cells().find(e => e.className.split(" ").includes("group") && e._n.key === a.key);
+    for (const t of ["click", "click", "dblclick"]) fire(byId["#map"].on[t], { target: { closest: () => b } });
+  } else if (a.map === "click") {
+    const b = a.name === null ? null : box(a.name);
+    fire(byId["#map"].on.click, { target: { closest: () => b } });
+  } else if (a.press) {
+    fire(docOn.keydown, { key: a.press, shiftKey: !!a.shift, target: body, preventDefault() {} });
+  } else if (a.type !== undefined) {
+    byId["#filter"].value = a.type;
+    fire(byId["#filter"].on.input, { target: byId["#filter"] });
+  } else if (a.filterKey) {
+    fire(docOn.keydown, { key: a.filterKey, target: byId["#filter"], preventDefault() {} });
+  } else if (a.pop !== undefined) {
+    fire(winOn.popstate, { state: a.pop });
+  } else if (a.hover) {
+    fire(byId["#map"].on.mousemove, { target: { closest: () => box(a.hover) }, clientX: 10, clientY: 10 });
+  }
 }
 console.log(JSON.stringify({
-  leaves: made.filter(e => e.className === "cell leaf").length,
+  leaves: made.filter(e => e.className.split(" ").includes("leaf")).length,
   boxes: made.map(e => e.innerHTML).join("\n"),
   side: byId["#side"].innerHTML, sub: byId["#sub"].innerHTML, meta: byId["#meta"].innerHTML,
   crumbs: byId["#crumbs"].innerHTML,
   views: byId["#views"]?.innerHTML ?? "", viewkeys: byId["#viewkeys"]?.innerHTML ?? "",  // only what the page asked for exists
+  tip: byId["#tip"]?.innerHTML ?? "",
+  drawn: cells().map(e => ({ cls: e.className, name: e._n?.name })),
+  history: calls, animations: animations.length,
   leafBoxes: made.filter(e => e.className.split(" ").includes("leaf"))
     .map(e => ({ cls: e.className, name: e._n.name, w: parseFloat(e.style.width), h: parseFloat(e.style.height) })),
 }));
