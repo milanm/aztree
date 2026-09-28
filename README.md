@@ -2,11 +2,11 @@
 
 [![PyPI](https://img.shields.io/pypi/v/aztree?label=PyPI)](https://pypi.org/project/aztree/) [![NuGet](https://img.shields.io/nuget/v/aztree?label=NuGet)](https://www.nuget.org/packages/aztree)
 
-**Where did my Azure money go?** aztree reads your Azure costs and draws them as a treemap: big box, big cost.
+aztree shows where your Azure money went. It draws your costs as a treemap, where a bigger box means a bigger cost.
 
 ![aztree showing a demo Azure bill as a treemap](https://raw.githubusercontent.com/milanm/aztree/main/docs/screenshot.png)
 
-It's one small Python package with no dependencies, and it produces a single HTML page that works offline.
+It's one small Python package with no dependencies. It writes a single HTML page that works offline.
 
 ## Quick start
 
@@ -18,7 +18,7 @@ dotnet tool install -g aztree    # .NET 8 or later, no Python needed
 brew install milanm/tap/aztree   # macOS and Linux, no Python needed
 ```
 
-Or download the executable for your system from the [latest release](https://github.com/milanm/aztree/releases/latest): Windows, Linux or macOS, no Python needed. The downloads aren't signed yet, so Windows and macOS ask once before running them. On Linux and macOS, run `chmod +x` on the file first.
+Or download the executable for Windows, Linux or macOS from the [latest release](https://github.com/milanm/aztree/releases/latest). It doesn't need Python. The downloads aren't signed yet, so Windows and macOS ask once before running them. On Linux and macOS, run `chmod +x` on the file first.
 
 Then:
 
@@ -39,29 +39,47 @@ The page opens in your browser. It shows the last 30 days, compared with the 30 
 - **Tag view:** spend by the values of one tag, with untagged spend as its own box and its share of the bill in the header. aztree picks the tag on the most resources; `--tag KEY` picks another.
 - **Color by change** (`c`): red where spend grew, green where it shrank.
 - **Selection panel:** cost, share of the bill, change vs the previous period, monthly pace and a daily chart. For the whole bill, the last two cells show this month so far and Azure's forecast for the month. The name of a selected subscription, resource group or resource opens it in the Azure portal.
-- **Worth a look:** one list where news and to-dos take turns. News is costs that grew and one-off spikes (a day far above that meter's usual). To-dos are known money pits, compute left on all week in dev/test resource groups, and resources that bill while doing nothing, which aztree finds with Azure Resource Graph (VMs stopped but not deallocated, unattached disks, unused public IPs, snapshots older than 90 days, App Service plans with no apps, NAT gateways on no subnet). When Advisor has no reservation or savings-plan tips, steady spend a reservation could cut shows up too. The first six show; "show all" opens the rest. The map hatches the boxes the to-dos are about.
-- **Money pits it knows:** Log Analytics ingestion, data transfer out, NAT and Firewall processing, public IPs, snapshots, retiring VM series with their retirement dates, Standard and Premium v2 App Service plans, several Front Door profiles, Front Door Premium, large DTU databases, Azure DevOps seats and hosted jobs, private endpoints, provisioned Cosmos DB throughput, 1-minute alert rules, Azure Cache for Redis (retiring) and Extended Security Updates.
-- **Biggest drops:** what fell since the previous period, including anything that went to zero, so you can see a saving land.
-- **Advisor:** Azure Advisor's cost recommendations (reservations, savings plans, right-sizing), one per resource and SKU. Reservation and savings-plan tips list the meters they would cover and what those run at a month. Click a tip to jump to its biggest meter, or to the resource it's about.
+- **Worth a look:** one list where news and to-dos take turns. The first six show, and "show all" opens the rest. On the map, the boxes a to-do is about have diagonal stripes.
+  - **News** is costs that grew and one-off spikes (a day far above that meter's usual).
+  - **To-dos** are known money pits (below) and compute left on all week in dev/test resource groups. When Advisor has no reservation or savings-plan tips, steady spend that a reservation could cut shows up too.
+  - **Idle resources** bill while doing nothing, and they count as to-dos. aztree finds them with Azure Resource Graph. It looks for VMs stopped but not deallocated, unattached disks and unused public IPs. It also looks for snapshots older than 90 days, empty App Service plans and NAT gateways on no subnet.
+- **Money pits it knows:**
+  - Compute: retiring VM series with their retirement dates, Extended Security Updates, and Standard and Premium v2 App Service plans.
+  - Networking: data transfer out, NAT and Firewall processing, public IPs, private endpoints, several Front Door profiles and Front Door Premium.
+  - Storage and databases: snapshots, large DTU databases, provisioned Cosmos DB throughput and Azure Cache for Redis (retiring).
+  - Monitoring: Log Analytics ingestion and 1-minute alert rules.
+  - Azure DevOps: seats and hosted jobs.
+- **Biggest drops:** what fell since the previous period, including anything that went to zero. Use it to check that a saving worked.
+- **Advisor:** Azure Advisor's cost tips for reservations, savings plans and right-sizing, one per resource and SKU. Reservation and savings-plan tips list the meters they would cover and what those cost a month. Click a tip to jump to its biggest meter, or to the resource it's about.
 - **Export for AI:** a JSON summary to hand to any AI agent (see below).
 
-Click to select and click again (or press Enter) to zoom in. Once you've clicked the map, `Tab` moves to the next box by size. Click a "+N more" box twice to see the small items it holds. `⌫` goes back up and the browser's Back button undoes zooms and jumps. `/` filters: what doesn't match fades, Enter keeps only the matches, and `Esc` clears the filter, then the selection. Add `#resource`, `#subscription`, `#region` or `#tag` to the page's URL to open that view.
+On the map:
+
+- Click to select, and click again or press Enter to zoom in. Click a "+N more" box twice to see the small items it holds.
+- Once you've clicked the map, `Tab` moves to the next box by size.
+- `⌫` goes back up. The browser's Back button undoes zooms and jumps.
+- `/` opens the filter. What doesn't match fades, and Enter keeps only the matches.
+- `Esc` clears the filter, then the selection.
+- Add `#resource`, `#subscription`, `#region` or `#tag` to the page's URL to open that view.
 
 ## Requirements
 
-- The [Azure CLI](https://aka.ms/azcli), logged in with `az login`, and Python 3.9+ or .NET 8+ unless you use the downloaded executable. Without the CLI, put a token for `https://management.azure.com/` in `AZURE_ACCESS_TOKEN` and name the subscriptions with `--subscription` or `--all`. A bare token only sees its own tenant; through the CLI, aztree sees every tenant you're logged in to and gets a token for each.
-- Azure PowerShell instead of the CLI works too: give aztree a token and name the subscription.
+- The [Azure CLI](https://aka.ms/azcli), logged in with `az login`, and Python 3.9+ or .NET 8+ unless you use the downloaded executable.
+- Without the CLI, put a token for `https://management.azure.com/` in `AZURE_ACCESS_TOKEN`. Then name the subscriptions with `--subscription` or `--all`. A token only sees its own tenant. Through the CLI, aztree gets a token for every tenant you're logged in to.
+- If you use Azure PowerShell instead of the CLI, give aztree a token and name the subscription:
 
   ```powershell
   $t = (Get-AzAccessToken -ResourceUrl https://management.azure.com/).Token
   $env:AZURE_ACCESS_TOKEN = if ($t -is [securestring]) { [System.Net.NetworkCredential]::new('', $t).Password } else { $t }
   aztree --subscription "My subscription"
   ```
-- The **Cost Management Reader** role (or Reader) on each subscription. Advisor tips, the Resource Graph checks and the automatic tag choice need Reader; without it you still get the page, and `--tag KEY` still gives you the tag view.
-- Tested on a CSP subscription. On CSP, Azure shows costs at retail prices without your partner's discounts, and reserved usage as $0 even with `--metric AmortizedCost`, so the totals won't match your partner's invoice. Pay-as-you-go and Visual Studio subscriptions use the same API.
+- The **Cost Management Reader** role (or Reader) on each subscription. Advisor tips, the Resource Graph checks and the automatic tag choice need Reader. Without it you still get the page, and `--tag KEY` still gives you the tag view.
+- Tested on a CSP subscription, where Azure shows retail prices without your partner's discounts. It also shows reserved usage as $0, even with `--metric AmortizedCost`, so the totals won't match your partner's invoice. Pay-as-you-go and Visual Studio subscriptions use the same API.
 - EA and MCA billing scopes should work through `--scope`, but nobody has tried yet. At such a scope the subscription view shows the whole scope as one box, and Advisor is skipped.
 
-**Cost:** Cost Management queries are free. Azure throttles them per subscription and per tenant, so a run makes about 10–14 requests per subscription and may wait 30–60 seconds when Azure asks it to. aztree saves the data in `~/.aztree/`, so reopening the page is instant:
+**Cost:** Cost Management queries are free, but Azure limits how often you can call them, per subscription and per tenant. A run makes about 10–14 requests per subscription and may wait 30–60 seconds when Azure asks it to.
+
+aztree saves the data in `~/.aztree/`, so reopening the page is instant:
 
 ```bash
 aztree --from
@@ -73,7 +91,11 @@ aztree --from
 aztree --from --export
 ```
 
-This writes `~/.aztree/aztree-export.json`, a compact summary that includes instructions for the agent. It has totals, breakdowns by service, subscription, region and resource group, and every meter with its change vs the previous period. It also lists the top growers and drops, credits and refunds, the flagged money pits, idle resources, the tag breakdown, this month's forecast and the Advisor tips. Give it to an AI agent and ask *"where can I save money?"*. The **Export for AI** button in the page (or `e`) downloads the same file.
+This writes `~/.aztree/aztree-export.json`, a summary of your bill with instructions for the agent. The **Export for AI** button in the page (or `e`) downloads the same file.
+
+The summary has totals and every meter with its change vs the previous period. It breaks the bill down by service, subscription, region, resource group and tag. It also lists the top growers and drops, credits and refunds, money pits, idle resources, this month's forecast and the Advisor tips.
+
+Give it to an AI agent and ask *"where can I save money?"*
 
 ## Options
 
@@ -100,19 +122,25 @@ This writes `~/.aztree/aztree-export.json`, a compact summary that includes inst
 - `ActualCost` books a reservation or savings plan purchase as one lump on the day you bought it. `--metric AmortizedCost` spreads it over the term.
 - Credits and refunds count in the totals, but negative amounts can't be drawn as boxes. The header says how much of the total they are.
 - Subscriptions that bill in different currencies are drawn in USD. When Azure can't convert them, the header says the totals mix currencies.
-- If a subscription has so many resources that a daily breakdown takes more than ten pages of results, the resource view still lists every resource but with one total per period and no daily chart.
+- Some subscriptions have so many resources that a daily breakdown takes more than ten pages of results. For those, the resource view still lists every resource, but with one total per period and no daily chart.
 - Marketplace charges keep their publisher's meter names and get no special handling.
 - The forecast is Azure's own, for the calendar month, so it doesn't follow `--days`. It's left out when a subscription has none, or when it comes in a different currency from the page.
 - Runs saved by older versions open without the tag view, the forecast and the idle checks.
-- Runs save to `~/.aztree/`; set `AZTREE_HOME` to move it. Older versions run from a clone saved to `out/`, and `aztree --from out/aztree-data.json` still opens those runs.
+- Runs save to `~/.aztree/`; set `AZTREE_HOME` to move it. Older versions saved runs to `out/` when you ran them from a clone. To open those, run `aztree --from out/aztree-data.json`.
 
 ## Checking against the portal
 
-In the Azure portal, open **Cost Management → Cost analysis**, choose the cost type you ran with (**Actual cost** by default), daily granularity and the dates in aztree's header. The totals should match to the cent. Azure can still add a little to the last day after aztree reads it, so compare soon after a run.
+In the Azure portal, open **Cost Management → Cost analysis**. Choose the cost type you ran with (**Actual cost** by default), daily granularity and the dates in aztree's header.
+
+The totals should match to the cent. Azure can still add a little to the last day after aztree reads it, so compare soon after a run.
 
 ## Privacy
 
-aztree only reads cost data, forecasts, tag names, Advisor recommendations and Resource Graph properties, and never changes anything in your subscriptions. Everything it writes goes to `~/.aztree/` (or `AZTREE_HOME`), outside any git repo, because it contains your subscription IDs and costs. The page loads nothing from the internet. Share the HTML or export file only with people who should see your bill.
+aztree only reads from Azure and never changes anything in your subscriptions. It reads cost data, forecasts, tag names, Advisor recommendations and Resource Graph properties.
+
+Everything it writes goes to `~/.aztree/` (or `AZTREE_HOME`), outside any git repo. Those files hold your subscription IDs and costs, so share the page or the export only with people who should see your bill.
+
+The page loads nothing from the internet.
 
 ## Development
 
@@ -121,7 +149,7 @@ python -m unittest discover -s tests
 python -m aztree --demo
 ```
 
-`packaging/build_native.py` freezes aztree into one executable with PyInstaller and checks it runs. `dotnet/` is the dotnet tool: a small launcher that runs the executable built for the machine it's on.
+`packaging/build_native.py` packs aztree into one executable with PyInstaller and checks that it runs. `dotnet/` holds the dotnet tool, a small launcher that runs the executable built for the machine it's on.
 
 The tests need no Azure access. The viewer tests run the page's script in Node and are skipped without it.
 
