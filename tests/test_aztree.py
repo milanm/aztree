@@ -1096,6 +1096,24 @@ class Batch1Test(unittest.TestCase):
         self.assertEqual(first_dev[2], ["Cost", "CostUSD"])
 
 
+    REFUNDED = [("Storage", "LRS", [5] * 6), ("Azure Cosmos DB", "Reservation refund", [0, 0, 0, -2, 0, 0])]
+
+    def test_export_totals_name_credits_and_refunds(self):
+        self.assertEqual(aztree.summarize(make_data(self.REFUNDED))["totals"]["credits_and_refunds"], -2.0)
+        self.assertEqual(aztree.summarize(BASIC)["totals"]["credits_and_refunds"], 0)
+        self.assertIn("credits_and_refunds", aztree.AI_INSTRUCTIONS)
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_page_says_what_credits_the_total_includes(self):
+        page = ViewerTest.run_page(self, make_data(self.REFUNDED), "service")
+        self.assertIn("-$2.00 credits &amp; refunds", page["sub"])
+        self.assertIn("-$2.00 credits &amp; refunds", page["side"])
+        plain = ViewerTest.run_page(self, make_data([("Storage", "LRS", [5] * 6)]), "service")
+        self.assertNotIn("credits", plain["sub"])
+
+    render = ViewerTest.render
+
+
 @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
 class ViewerEdgesTest(unittest.TestCase):
     render = ViewerTest.render

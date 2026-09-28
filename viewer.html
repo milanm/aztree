@@ -260,10 +260,13 @@ function buildTree(viewKey, filter) {
   (function total(n) {
     if (n.children) {
       for (const c of n.children) { total(c); for (let i = 0; i < N; i++) n.daily[i] += c.daily[i]; }
+      // credits and refunds can't be drawn as boxes, but they are in the totals: keep count of them
+      n.credits = n.children.reduce((s, c) => s + c.credits, 0);
       n.children = n.children.filter(c => c.cur >= 0.005).sort((a, b) => b.cur - a.cur);
     }
     n.prev = 0; n.cur = 0;
     for (let i = 0; i < N; i++) i < SPLIT ? (n.prev += n.daily[i]) : (n.cur += n.daily[i]);
+    if (!n.children) n.credits = Math.min(n.cur, 0);
   })(root);
   return root;
 }
@@ -365,6 +368,11 @@ function render() {
   renderSide();
 }
 
+// a total that includes credits or refunds is bigger in boxes than in the header; say by how much
+const creditNote = (n, tag) => (n.credits <= -0.005
+  ? `<${tag} class="credits" title="negative rows (credits, refunds) count in the total but can't be drawn as boxes">incl. ${money(n.credits)} credits &amp; refunds</${tag}>`
+  : "");
+
 function renderChrome(base) {
   const v = DATA.views[state.view], [A, B] = v.dims;
   document.querySelectorAll("#views button").forEach(b => b.classList.toggle("on", b.dataset.v === state.view));
@@ -379,7 +387,7 @@ function renderChrome(base) {
   const fallback = state.view === "resource" && DATA.resource_fallback?.length
     ? `<span title="too many resources to list one by one">by service in ${esc(DATA.resource_fallback.join(", "))}</span>` : "";
   $("#sub").innerHTML = `<span><b>${money(root.cur)}</b> · ${period()}</span><span>${root.children.length} ${DIM[A].many} · ${leaves} ${DIM[B].many}</span>
-    ${fallback}${state.filter ? `<span>filter “${esc(state.filter)}” · ${pct(root.cur / grand)} of bill</span>` : ""}<div class="legend">${legend}</div>`;
+    ${fallback}${creditNote(root, "span")}${state.filter ? `<span>filter “${esc(state.filter)}” · ${pct(root.cur / grand)} of bill</span>` : ""}<div class="legend">${legend}</div>`;
 }
 
 function spark(n) {
@@ -405,7 +413,7 @@ function renderSide() {
 
   let html = `<section><div class="h">Selection</div>
     <div class="sel-name">${esc(title)}</div><div class="sel-path">${esc(path)}</div>
-    <div class="big">${bigMoney(n.cur)}</div><div style="color:var(--dim)">last ${DAYS} days · ${period()}</div>
+    <div class="big">${bigMoney(n.cur)}</div><div style="color:var(--dim)">last ${DAYS} days · ${period()}</div>${creditNote(n, "div")}
     <div class="bar"><i style="width:${Math.min(100, share * 100)}%"></i></div>
     <div class="stats">
       <div><span>of bill</span>${pct(share)}</div>

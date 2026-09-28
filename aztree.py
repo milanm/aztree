@@ -563,7 +563,8 @@ AI_INSTRUCTIONS = (
     "This is an Azure cost breakdown exported by aztree. Amounts are in `currency`, for the cost type in `metric` "
     "(ActualCost books reservation and savings plan purchases on the day they were bought; AmortizedCost spreads them "
     "over the term). `current` is the most recent period and `previous` is the equally long period before it. "
-    "Line items are Azure meters grouped by service. `flags` are known cost traps matched on meter names. `advisor` holds "
+    "Line items are Azure meters grouped by service; `totals.credits_and_refunds` is the part of `current` that comes "
+    "from negative line items (credits, refunds). `flags` are known cost traps matched on meter names. `advisor` holds "
     "Azure Advisor's cost recommendations, one per kind, resource and SKU, with the largest annual saving Advisor "
     "reported; recommendations that cover the same usage (a reservation and a savings plan, a 1-year and a 3-year term) "
     "are alternatives, not additive. "
@@ -665,7 +666,8 @@ def summarize(data):
             "current": {"start": days[split], "end": days[-1], "days": n},
             "previous": {"start": days[0], "end": days[split - 1], "days": split},
         },
-        "totals": {**entry(grand, grand_prev), "daily_avg": money(grand / n), "monthly_pace": money(grand / n * 30.4)},
+        "totals": {**entry(grand, grand_prev), "daily_avg": money(grand / n), "monthly_pace": money(grand / n * 30.4),
+                   "credits_and_refunds": money(sum(min(x["current"], 0) for x in line_items))},
         "by_service": [{"service": k, **entry(g["cur"], g["prev"])} for k, g in services if keep(g["cur"], g["prev"])],
         "by_subscription": breakdown("subscription", "subscription_id", "service"),
         "by_region": breakdown("region", "region", "service"),
