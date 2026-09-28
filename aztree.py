@@ -18,6 +18,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+TEMPLATE = HERE / "viewer.html"
+OUT = HERE / "out"  # everything generated goes here (git-ignored: it contains your subscription IDs and costs)
 
 ARM = "https://management.azure.com"
 API_VERSION = "2025-03-01"  # Microsoft.CostManagement/query
@@ -425,6 +430,16 @@ def summarize(data):
 def export(data, path):
     path.write_text(json.dumps(summarize(data), indent=2, ensure_ascii=False), encoding="utf-8")
     return path
+
+
+# ---------------------------------------------------------------- output
+
+def render(data, out):
+    html = TEMPLATE.read_text(encoding="utf-8")
+    page = {**data, "pits": PITS, "export": summarize(data)}
+    # < keeps names like "</script>" or "<!--" from ending the script block early
+    blob = json.dumps(page, separators=(",", ":"), ensure_ascii=False).replace("<", "\\u003c")
+    out.write_text(html.replace("__AZTREE_DATA__", blob), encoding="utf-8")
 
 
 def advisor_rec(p, target):

@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>awstree</title>
+<title>aztree</title>
 <style>
 :root {
   --bg: #0d1016; --frame: #050608; --panel: #11151c; --line: #222835; --text: #d6dae2;
   --muted: #7c8494; --dim: #545b69; --accent: #e3a55a; --neutral: #5a6170;
   --compute: #d4874b; --storage: #4d8ad6; --database: #c25c90; --network: #3cae9f;
   --ai: #9870ee; --analytics: #cbb04a; --ops: #5fb06a; --other: #858b97;
-  --up: #e5534b; --down: #3fb68b;
+  --up: #e5534b; --down: #3fb68b; --advisor: #4fa3e0;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--frame); color: var(--text);
@@ -28,7 +28,7 @@ header { grid-column: 1 / -1; display: flex; align-items: center; gap: 14px; pad
 .crumbs { color: var(--dim); display: flex; gap: 6px; align-items: center; min-width: 0; overflow: hidden; white-space: nowrap; }
 .crumbs a { color: var(--muted); cursor: pointer; text-decoration: none; }
 .crumbs a:hover { color: var(--text); }
-.crumbs .cur { color: var(--text); background: #1b212c; padding: 2px 7px; border-radius: 4px; }
+.crumbs .cur { color: var(--text); background: #1b212c; padding: 2px 7px; border-radius: 4px; overflow: hidden; text-overflow: ellipsis; }
 .spacer { flex: 1; }
 .seg { display: flex; border: 1px solid var(--line); border-radius: 6px; padding: 2px; gap: 2px; }
 .seg button { background: none; border: 0; color: var(--muted); font: inherit; padding: 4px 11px; border-radius: 4px; cursor: pointer; }
@@ -81,21 +81,22 @@ aside { grid-column: 2; grid-row: 2 / 4; border-left: 1px solid var(--line); bac
 .spark { margin-top: 14px; }
 .spark svg { display: block; width: 100%; height: 46px; }
 .spark .axis { display: flex; justify-content: space-between; color: var(--dim); font-size: 10px; margin-top: 3px; }
-.hint { display: grid; grid-template-columns: 1fr auto; gap: 1px 10px; border-left: 2px solid var(--c, var(--accent));
+.hint { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 1px 10px; border-left: 2px solid var(--c, var(--accent));
   padding: 2px 0 2px 9px; cursor: pointer; margin-top: 11px; }
 .hint:hover .hn { color: #fff; }
 .hn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.hv { text-align: right; }
+.hv { text-align: right; white-space: nowrap; }
 .hs { color: var(--dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hb { height: 3px; background: #1d2330; border-radius: 2px; align-self: center; width: 80px; overflow: hidden; }
 .hb i { display: block; height: 100%; background: var(--c, var(--accent)); opacity: .8; }
-.bill { margin-top: auto; border-top: 1px solid var(--line); padding-top: 14px; }
-.bill .big { font-size: 26px; margin-top: 6px; }
-.bill-row { display: flex; justify-content: space-between; color: var(--muted); margin-top: 5px; }
-.bill-row b { color: var(--text); font-weight: 400; }
+.foot { margin-top: auto; border-top: 1px solid var(--line); padding-top: 14px; }
+.foot .h b { color: var(--advisor); }
+.note { color: var(--dim); margin-top: 9px; }
 
 footer { grid-column: 1 / -1; display: flex; align-items: center; gap: 14px; padding: 7px 14px; border-top: 1px solid var(--line);
   color: var(--dim); white-space: nowrap; overflow: hidden; }
+footer a { color: var(--muted); text-decoration: none; }
+footer a:hover { color: var(--text); }
 kbd { font: 10.5px ui-monospace, Menlo, monospace; color: var(--muted); border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; margin-right: 4px; }
 .badge { color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); border-radius: 4px; padding: 0 6px; }
 
@@ -115,46 +116,52 @@ kbd { font: 10.5px ui-monospace, Menlo, monospace; color: var(--muted); border: 
 <body>
 <div class="app">
   <header>
-    <div class="logo"><i><b style="background:var(--compute)"></b><b style="background:var(--storage)"></b><b style="background:var(--database)"></b><b style="background:var(--network)"></b></i>awstree</div>
+    <div class="logo"><i><b style="background:var(--compute)"></b><b style="background:var(--storage)"></b><b style="background:var(--database)"></b><b style="background:var(--network)"></b></i>aztree</div>
     <div class="crumbs" id="crumbs"></div>
     <div class="spacer"></div>
     <div class="seg" id="views">
-      <button data-v="service">Service</button><button data-v="account">Account</button><button data-v="region">Region</button>
+      <button data-v="service">Service</button><button data-v="subscription">Subscription</button><button data-v="region">Region</button><button data-v="resource">Resource</button>
     </div>
     <label class="chk"><input type="checkbox" id="change"> Color by change</label>
     <button id="export" title="Download a JSON summary to give to an AI agent (e)">Export for AI</button>
-    <input id="filter" placeholder="filter  /" autocomplete="off" spellcheck="false">
+    <input id="filter" aria-label="Filter" placeholder="filter  /" autocomplete="off" spellcheck="false">
   </header>
   <div class="sub" id="sub"></div>
   <div id="map"></div>
   <aside id="side"></aside>
   <footer>
     <span><kbd>click</kbd>select</span><span><kbd>dbl-click</kbd><kbd>enter</kbd>open</span><span><kbd>⌫</kbd>up</span>
-    <span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd>view</span><span><kbd>c</kbd>color</span><span><kbd>/</kbd>filter</span><span><kbd>e</kbd>export</span><span><kbd>esc</kbd>clear</span>
+    <span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><kbd>4</kbd>view</span><span><kbd>c</kbd>color</span><span><kbd>/</kbd>filter</span><span><kbd>e</kbd>export</span><span><kbd>esc</kbd>clear</span>
     <span class="spacer"></span><span id="meta"></span>
   </footer>
 </div>
 <div id="tip"></div>
 
 <script>
-const DATA = __AWSTREE_DATA__;
+const DATA = __AZTREE_DATA__;
 
 const N = DATA.days.length, SPLIT = DATA.split, DAYS = N - SPLIT;
+const VIEW_KEYS = ["service", "subscription", "region", "resource"];
 const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-const state = { view: "service", change: false, filter: "", zoom: null, sel: null };
+const hashView = decodeURIComponent(location.hash.slice(1));
+const state = { view: DATA.views[hashView] ? hashView : "service", change: false, filter: "", zoom: null, sel: null };
 
 // ---------- formatting
-function money(v) {
-  const a = Math.abs(v), s = v < 0 ? "-$" : "$";
-  if (a >= 1e6) return s + (a / 1e6).toFixed(2) + "M";
-  if (a >= 1e4) return s + (a / 1e3).toFixed(1) + "k";
-  if (a >= 100) return s + Math.round(a).toLocaleString("en-US");
-  return s + a.toFixed(2);
+const SYMBOLS = { USD: "$", EUR: "€", GBP: "£", JPY: "¥", CNY: "¥", INR: "₹", KRW: "₩", BRL: "R$", AUD: "A$", CAD: "C$",
+  NZD: "NZ$", HKD: "HK$", TWD: "NT$", MXN: "MX$", ILS: "₪", TRY: "₺", PLN: "zł ", ZAR: "R " };
+const sym = code => esc(SYMBOLS[code || "USD"] ?? `${code} `);
+const CUR = sym(DATA.currency);
+function money(v, s = CUR) {
+  const a = Math.abs(v), p = (v < 0 ? "-" : "") + s;
+  if (a >= 1e6) return p + (a / 1e6).toFixed(2) + "M";
+  if (a >= 1e4) return p + (a / 1e3).toFixed(1) + "k";
+  if (a >= 100) return p + Math.round(a).toLocaleString("en-US");
+  return p + a.toFixed(2);
 }
 function bigMoney(v) {
   const [w, c] = Math.abs(v).toFixed(2).split(".");
-  return `${v < 0 ? "-" : ""}$${Number(w).toLocaleString("en-US")}<small>.${c}</small>`;
+  return `${v < 0 ? "-" : ""}${CUR}${Number(w).toLocaleString("en-US")}<small>.${c}</small>`;
 }
 const pct = v => (v >= 0.1 || v === 0 ? Math.round(v * 100) : (v * 100).toFixed(1)) + "%";
 const day = s => new Date(s + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" });
@@ -162,39 +169,46 @@ const period = () => `${day(DATA.days[SPLIT])} – ${day(DATA.days[N - 1])}`;
 
 // ---------- names and categories
 const SHORT = {
-  "Amazon Elastic Compute Cloud - Compute": "EC2", "Amazon Relational Database Service": "RDS",
-  "Amazon Simple Storage Service": "S3", "Amazon Virtual Private Cloud": "VPC", "Amazon Elastic Kubernetes Service": "EKS",
-  "Amazon Elastic Container Service": "ECS", "Amazon EC2 Container Registry (ECR)": "ECR", "Amazon Elastic Load Balancing": "ELB",
-  "Amazon Elastic File System": "EFS", "Amazon Simple Queue Service": "SQS", "Amazon Simple Notification Service": "SNS",
-  "Amazon Simple Email Service": "SES", "AWS Key Management Service": "KMS", "Amazon Elastic MapReduce": "EMR",
-  "Amazon Elastic Container Service for Kubernetes": "EKS", "AmazonCloudWatch": "CloudWatch",
+  "Azure Front Door Service": "Front Door", "Azure Data Factory v2": "Data Factory", "Azure Grafana Service": "Managed Grafana",
+  "Azure Kubernetes Service": "AKS", "Microsoft Defender for Cloud": "Defender for Cloud", "Azure Cognitive Search": "AI Search",
 };
-// usage types start with a region code (USE1-, EUW2-, US-...): shown separately so the name fits
-const REGION_PREFIX = /^[A-Z]{2,4}\d?-(?=[A-Za-z])/;
-const regionOf = n => (n.dim === "USAGE_TYPE" && (n.key.match(REGION_PREFIX) || [""])[0].slice(0, -1)) || "";
-const shortSvc = s => SHORT[s] || s.replace(/^(Amazon|AWS)\s+/, "");
+const shortSvc = s => SHORT[s] || s.replace(/^(Azure|Microsoft)\s+/, "");
+const lastSeg = id => id.split("/").filter(Boolean).pop() || id;
 const DIM = {
-  SERVICE: { one: "service", many: "services", label: (v) => shortSvc(v) },
-  USAGE_TYPE: { one: "usage type", many: "usage types", label: (v) => v.replace(REGION_PREFIX, "") || v },
-  LINKED_ACCOUNT: { one: "account", many: "accounts", label: (v, names) => names[v] || v },
-  REGION: { one: "region", many: "regions", label: (v) => (!v || v === "NoRegion" ? "global" : v) },
+  ServiceName: { one: "service", many: "services", label: v => shortSvc(v) },
+  Meter: { one: "meter", many: "meters", label: v => v },
+  SubscriptionId: { one: "subscription", many: "subscriptions", label: (v, names) => names[v] || v },
+  ResourceLocation: { one: "region", many: "regions", label: v => v || "(no region)" },
+  ResourceGroupName: { one: "resource group", many: "resource groups", label: (v, names) => names[v] || lastSeg(v) },
+  // the resource view falls back to services per group when a subscription has too many resources
+  ResourceId: { one: "resource", many: "resources", label: v => (v.startsWith("/") ? lastSeg(v) : shortSvc(v)) },
 };
 const CATS = [
   ["compute", "Compute"], ["storage", "Storage"], ["database", "Database"], ["network", "Network"],
   ["ai", "AI / ML"], ["analytics", "Analytics"], ["ops", "Ops & security"], ["other", "Other"],
 ];
 const SVC_RULES = [
-  ["ai", /Bedrock|SageMaker|Rekognition|Comprehend|Textract|Transcribe|Polly|Translate|Kendra|Amazon Q\b|\bLex\b|Personalize/i],
-  ["database", /Relational|\bRDS\b|DynamoDB|ElastiCache|Aurora|Redshift|DocumentDB|Neptune|Keyspaces|MemoryDB|Timestream/i],
-  ["analytics", /Athena|Glue|MapReduce|\bEMR\b|Kinesis|OpenSearch|Elasticsearch|QuickSight|Kafka|\bMSK\b|Firehose/i],
-  ["storage", /Simple Storage|\bS3\b|Elastic File|Glacier|Backup|FSx|Storage Gateway|Container Registry/i],
-  ["network", /CloudFront|Virtual Private Cloud|\bVPC\b|Route 53|Load Balanc|Data Transfer|Direct Connect|Global Accelerator|API Gateway|Transit|Network Firewall/i],
-  ["ops", /CloudWatch|CloudTrail|\bConfig\b|Systems Manager|X-Ray|Security Hub|GuardDuty|Inspector|Key Management|Secrets Manager|\bWAF\b|Shield|Macie|Detective/i],
-  ["compute", /Elastic Compute|EC2|Lambda|Container Service|Kubernetes|Fargate|Lightsail|Batch|App Runner|Beanstalk|Step Functions/i],
+  ["ai", /Foundry|Cognitive Services|OpenAI|Machine Learning|AI Search|Cognitive Search|Bot Service|Speech|Translator|Document Intelligence|Form Recognizer|Azure AI/i],
+  ["database", /SQL|Cosmos DB|Redis|MySQL|PostgreSQL|MariaDB|Database|Cache/i],
+  ["ops", /Monitor|Log Analytics|Defender|Security Center|Sentinel|Key Vault|Application Insights|Automation|Grafana|Azure Arc|App Configuration|Policy|Entra|Active Directory/i],
+  ["analytics", /Synapse|Data Factory|Databricks|Event Hubs|Stream Analytics|Data Explorer|HDInsight|Power BI|Fabric|Analysis Services|Purview/i],
+  ["storage", /Storage|Backup|Site Recovery|NetApp|Container Registry|Data Box|Archive/i],
+  ["network", /Bandwidth|Virtual Network|Front Door|CDN|Content Delivery|Load Balancer|Application Gateway|VPN Gateway|ExpressRoute|NAT Gateway|DNS|Traffic Manager|Firewall|Private Link|Network Watcher|DDoS|Bastion|API Management|Virtual WAN/i],
+  ["compute", /Virtual Machines|App Service|Functions|Kubernetes|Container Instances|Container Apps|Batch|Cloud Services|Service Fabric|Logic Apps|Spring|Virtual Desktop|Static Web Apps/i],
 ];
-const UT_RULES = [
-  ["storage", /EBS:|SnapshotUsage|VolumeUsage|TimedStorage|Storage/i],
-  ["network", /DataTransfer|NatGateway|IPv4|ElasticIP|LoadBalancerUsage|LCUUsage|VpcEndpoint|AWS-(In|Out)-Bytes/i],
+const METER_RULES = [
+  ["storage", /Data Stored|\bDisks?\b|Snapshot|\b(LRS|GRS|ZRS|RA-GRS)\b|Backup/i],
+  ["network", /Data Transfer|Bandwidth|Public IP|Private Endpoint/i],
+];
+// resource ids name their provider: /subscriptions/../providers/microsoft.web/sites/shop
+const PROVIDER_RULES = [
+  ["storage", /\/providers\/microsoft\.(compute\/(disks|snapshots)|storage\/|containerregistry|recoveryservices|netapp|dataprotection)/],
+  ["ai", /\/providers\/microsoft\.(cognitiveservices|machinelearningservices|search\/|botservice)/],
+  ["database", /\/providers\/microsoft\.(sql|documentdb|cache|dbfor)/],
+  ["ops", /\/providers\/microsoft\.(operationalinsights|insights|keyvault|security|dashboard|appconfiguration|automation|operationsmanagement|alertsmanagement)/],
+  ["analytics", /\/providers\/microsoft\.(eventhub|datafactory|synapse|databricks|kusto|streamanalytics|hdinsight|purview|fabric)/],
+  ["network", /\/providers\/microsoft\.(network|cdn)\//],
+  ["compute", /\/providers\/microsoft\.(compute|web|containerservice|app\/|containerinstance|logic|batch|servicefabric)/],
 ];
 const match = (rules, s) => (rules.find(([, re]) => re.test(s)) || [])[0];
 const svcCat = s => match(SVC_RULES, s) || "other";
@@ -202,8 +216,9 @@ const svcCat = s => match(SVC_RULES, s) || "other";
 function category(n) {
   const [A, B] = DATA.views[state.view].dims;
   const dim = n.kind === "leaf" ? B : A;
-  if (dim === "USAGE_TYPE") return match(UT_RULES, n.key) || svcCat(n.parent.key);
-  if (dim === "SERVICE") return svcCat(n.key);
+  if (dim === "Meter") return match(METER_RULES, n.key) || svcCat(n.parent.key);
+  if (dim === "ServiceName") return svcCat(n.key);
+  if (dim === "ResourceId") return n.key.startsWith("/") ? match(PROVIDER_RULES, n.key) || "other" : svcCat(n.key);
   return null;
 }
 function color(n) {
@@ -225,7 +240,7 @@ function buildTree(viewKey, filter) {
   const root = { kind: "root", name: "all", children: [], daily: new Float64Array(N) };
   const groups = new Map();
   for (const r of v.rows) {
-    const [a, b] = A === "REGION" && (!r.k[0] || r.k[0] === "NoRegion") ? ["global", r.k[1]] : r.k;
+    const [a, b] = r.k;
     const ga = DIM[A].label(a, names), lb = DIM[B].label(b, names);
     if (q && !`${a} ${b} ${ga} ${lb}`.toLowerCase().includes(q)) continue;
     let g = groups.get(a);
@@ -296,7 +311,7 @@ function cell(cls, n, r, gap) {
 }
 function drawLeaf(frag, r) {
   const el = cell("leaf", r.n, r, 1);
-  if (r.w > 42 && r.h > 17) el.innerHTML = `<div class="n">${esc(r.n.name)}</div>` + (r.h > 32 ? `<div class="v">${money(r.n.cur)}${regionOf(r.n) ? " · " + regionOf(r.n) : ""}</div>` : "");
+  if (r.w > 42 && r.h > 17) el.innerHTML = `<div class="n">${esc(r.n.name)}</div>` + (r.h > 32 ? `<div class="v">${money(r.n.cur)}</div>` : "");
   frag.append(el);
 }
 function drawGroup(frag, r) {
@@ -336,8 +351,10 @@ function renderChrome(base) {
   const legend = state.change
     ? [["--down", "down"], ["--neutral", "flat"], ["--up", "up / new"]].map(([c, l]) => `<span><i style="background:var(${c})"></i>${l}</span>`).join("")
     : CATS.map(([k, l]) => `<span><i style="background:var(--${k})"></i>${l}</span>`).join("");
+  const fallback = state.view === "resource" && DATA.resource_fallback?.length
+    ? `<span title="too many resources to list one by one">by service in ${esc(DATA.resource_fallback.join(", "))}</span>` : "";
   $("#sub").innerHTML = `<span><b>${money(root.cur)}</b> · ${period()}</span><span>${root.children.length} ${DIM[A].many} · ${leaves} ${DIM[B].many}</span>
-    ${state.filter ? `<span>filter “${esc(state.filter)}” · ${pct(root.cur / grand)} of bill</span>` : ""}<div class="legend">${legend}</div>`;
+    ${fallback}${state.filter ? `<span>filter “${esc(state.filter)}” · ${pct(root.cur / grand)} of bill</span>` : ""}<div class="legend">${legend}</div>`;
 }
 
 function spark(n) {
@@ -356,7 +373,8 @@ function renderSide() {
   const d = n.cur - n.prev, share = grand > 0 ? n.cur / grand : 0;
   const change = n.prev < 0.01 ? (n.cur > 0 ? `<b class="upc">new</b>` : "–")
     : `<b class="${d > 0 ? "upc" : "downc"}">${d > 0 ? "+" : ""}${pct(d / n.prev)}</b> <b style="color:var(--dim)">${d > 0 ? "+" : ""}${money(d)}</b>`;
-  const path = n.kind === "leaf" ? `${n.parent.name} / ${n.full}` : n.kind === "group" ? n.full : `${DIM[A].many} → ${DIM[B].many}`;
+  const path = n.kind === "leaf" ? (n.full.startsWith("/") ? n.full : `${n.parent.name} / ${n.full}`)
+    : n.kind === "group" ? n.full : `${DIM[A].many} → ${DIM[B].many}`;
   const kind = n.kind === "root" ? "whole bill" : DIM[n.dim].one;
   const title = n.kind === "root" ? (state.filter ? `“${state.filter}”` : "Everything") : n.name;
 
@@ -382,30 +400,39 @@ function renderSide() {
         <div class="hs" title="${esc(h.why)}">${esc(h.why)}</div><div class="hb"><i style="width:${(h.n.cur / max) * 100}%"></i></div></div>`).join("") +
       `</section>`;
   }
+  $("#side").innerHTML = html + advisorPanel();
+}
 
-  const bill = DATA.bill || {}, types = Object.entries(bill).filter(([, v]) => Math.abs(v) >= 0.005).sort((a, b) => b[1] - a[1]);
-  if (types.length) {
-    const net = types.reduce((s, [, v]) => s + v, 0), gross = types.reduce((s, [, v]) => s + Math.max(v, 0), 0);
-    const credits = -types.reduce((s, [, v]) => s + Math.min(v, 0), 0);
-    html += `<section class="bill"><div class="h">Bill · ${period()}</div>
-      <div class="big">${bigMoney(net)} <small>net</small></div>
-      <div class="bar"><i style="width:${gross ? (net / gross) * 100 : 0}%;background:var(--storage)"></i></div>
-      ${types.map(([k, v]) => `<div class="bill-row"><span>${esc(k.replace(/([a-z])([A-Z])/g, "$1 $2"))}</span><b>${money(v)}</b></div>`).join("")}
-      ${credits ? `<div class="bill-row"><span>credits cover</span><b>${pct(credits / gross)}</b></div>` : ""}</section>`;
+// ---------- Azure Advisor: cost recommendations, read by aztree.py (none when run with --no-advisor)
+const TERM = { P1Y: "1-yr term", P3Y: "3-yr term", P5Y: "5-yr term" };
+const SHOWN_RECS = 5;
+function advisorPanel() {
+  const recs = DATA.advisor;
+  if (!recs) return "";
+  if (!recs.length) {
+    const why = DATA.advisor_error ? "Advisor wasn't readable with this login (needs Reader)." : "Advisor has no cost recommendations.";
+    return `<section class="foot"><div class="h">Advisor</div><div class="note">${why}</div></section>`;
   }
-  $("#side").innerHTML = html;
+  const top = recs.slice(0, SHOWN_RECS), max = Math.max(...top.map(r => r.annual_savings || 0), 1);
+  return `<section class="foot"><div class="h">Advisor <b>${recs.length} cost tip${recs.length > 1 ? "s" : ""}</b></div>` +
+    top.map((r, i) => `<div class="hint" data-rec="${i}" style="--c:var(--advisor)">
+      <div class="hn" title="${esc(r.solution || r.problem)}">${esc(r.problem)}</div>
+      <div class="hv">${r.annual_savings ? money(r.annual_savings, sym(r.currency || DATA.currency)) + "/yr" : "–"}</div>
+      <div class="hs" title="${esc(r.resource || "")}">${esc([r.resource_name, r.sku, TERM[r.term]].filter(Boolean).join(" · "))}</div>
+      <div class="hb"><i style="width:${((r.annual_savings || 0) / max) * 100}%"></i></div></div>`).join("") +
+    (recs.length > SHOWN_RECS ? `<div class="note">+${recs.length - SHOWN_RECS} more in Export for AI</div>` : "") + `</section>`;
 }
 
 // ---------- worth a look: known money pits + fastest growers (always from the service view)
-const PITS = (DATA.pits || []).map(([re, why]) => [new RegExp(re), why]); // rules live in awstree.py
+const PITS = (DATA.pits || []).map(([s, m, why]) => [new RegExp(s), new RegExp(m), why]); // rules live in aztree.py
 let _hints;
 function worthALook() {
   if (_hints) return _hints;
   const t = buildTree("service", ""), leaves = t.children.flatMap(g => g.children), out = [], seen = new Set();
   const minCost = t.cur * 0.002;
   for (const n of leaves) {
-    const pit = PITS.find(([re]) => re.test(n.key));
-    if (pit && n.cur >= minCost) { out.push({ n, why: pit[1], c: "var(--accent)" }); seen.add(n); }
+    const pit = PITS.find(([s, m]) => s.test(n.parent.key) && m.test(n.key));
+    if (pit && n.cur >= minCost) { out.push({ n, why: pit[2], c: "var(--accent)" }); seen.add(n); }
   }
   for (const n of leaves) {
     const d = n.cur - n.prev;
@@ -419,10 +446,14 @@ function worthALook() {
 }
 
 // ---------- interaction
+function showView(v) {
+  state.view = v; state.zoom = null; state.sel = null;
+  root = buildTree(v, state.filter);
+  history.replaceState(null, "", "#" + v);
+}
 function setView(v) {
   if (!DATA.views[v] || v === state.view) return;
-  state.view = v; state.zoom = null; state.sel = null;
-  root = buildTree(v, state.filter); render();
+  showView(v); render();
 }
 function select(n) {
   if (state.sel?._el) state.sel._el.classList.remove("sel");
@@ -438,6 +469,17 @@ function up() {
   if (state.zoom) { const g = zoomed(); state.zoom = null; state.sel = g || null; render(); }
   else if (state.sel) select(null);
 }
+function clearFilter() { state.filter = ""; $("#filter").value = ""; }
+// jump to a box in a view: zoom into its group and select it
+function reveal(view, find) {
+  clearFilter(); showView(view);
+  for (const g of root.children) {
+    if (find(g)) { state.sel = g; break; }
+    const leaf = g.children.find(find);
+    if (leaf) { state.zoom = g.key; state.sel = leaf; break; }
+  }
+  render();
+}
 
 map.addEventListener("click", e => { const c = e.target.closest(".cell"); select(c ? c._n : null); });
 map.addEventListener("dblclick", e => { const c = e.target.closest(".cell"); if (c) open(c._n); });
@@ -451,14 +493,14 @@ $("#filter").addEventListener("input", e => {
   render();
 });
 $("#side").addEventListener("click", e => {
-  const h = e.target.closest("[data-hint]");
-  if (!h) return;
-  const leaf = worthALook()[+h.dataset.hint].n;
-  state.view = "service"; state.filter = ""; $("#filter").value = "";
-  root = buildTree("service", "");
-  const g = root.children.find(g => g.key === leaf.parent.key);
-  state.zoom = g.key; state.sel = g.children.find(c => c.key === leaf.key) || null;
-  render();
+  const h = e.target.closest("[data-hint]"), r = e.target.closest("[data-rec]");
+  if (h) {
+    const leaf = worthALook()[+h.dataset.hint].n;
+    reveal("service", n => n.kind === "leaf" && n.key === leaf.key && n.parent.key === leaf.parent.key);
+  } else if (r) {
+    const rec = DATA.advisor[+r.dataset.rec];
+    if (/\/resourcegroups\//.test(rec.resource)) reveal("resource", n => n.key === rec.resource);
+  }
 });
 document.addEventListener("keydown", e => {
   const typing = e.target === $("#filter");
@@ -473,12 +515,12 @@ document.addEventListener("keydown", e => {
   else if (e.key === "Backspace") { e.preventDefault(); up(); }
   else if (e.key === "e" && DATA.export) exportJSON();
   else if (e.key === "c" || e.key === "t") { state.change = !state.change; render(); }
-  else if (["1", "2", "3"].includes(e.key)) setView(["service", "account", "region"][+e.key - 1]);
+  else if (["1", "2", "3", "4"].includes(e.key)) setView(VIEW_KEYS[+e.key - 1]);
 });
 
 function exportJSON() {
   const blob = new Blob([JSON.stringify(DATA.export, null, 2)], { type: "application/json" });
-  const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: "awstree-export.json" });
+  const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: "aztree-export.json" });
   a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 $("#export").addEventListener("click", exportJSON);
@@ -499,8 +541,10 @@ map.addEventListener("mousemove", e => {
 });
 map.addEventListener("mouseleave", () => (tip.style.display = "none"));
 
+const subs = DATA.subscriptions || [];
 $("#meta").innerHTML = (DATA.demo ? `<span class="badge">demo data</span> ` : "") +
-  `${esc(DATA.metric || "UnblendedCost")} · profile ${esc(DATA.profile || "default")} · read ${esc(DATA.generated || "")}`;
+  `${esc(DATA.metric || "ActualCost")} · ${esc(subs.length === 1 ? subs[0].name : subs.length + " subscriptions")} · read ${esc(DATA.generated || "")}` +
+  ` · <a href="https://github.com/petricbranko/awstree" target="_blank" rel="noopener">a port of awstree</a>`;
 let raf;
 render();
 new ResizeObserver(() => { cancelAnimationFrame(raf); raf = requestAnimationFrame(render); }).observe(map);

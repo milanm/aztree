@@ -591,6 +591,110 @@ class SummarizeTest(unittest.TestCase):
             self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["line_items"][0]["meter"], "Snapshots · Zürich")
 
 
+TEMPLATE = (Path(__file__).resolve().parent.parent / "viewer.html").read_text(encoding="utf-8")
+
+# Runs the viewer's script in Node against a bare-bones DOM: enough to prove each view draws boxes
+# and fills the side panel, without a browser.
+FAKE_DOM = r"""
+const vm = require("vm"), fs = require("fs");
+const [code, view] = JSON.parse(fs.readFileSync(0, "utf8"));
+class El {
+  constructor(tag) {
+    Object.assign(this, { tag, children: [], dataset: {}, className: "", innerHTML: "", value: "", checked: false,
+      isConnected: true, clientWidth: 1100, clientHeight: 700, offsetWidth: 100, offsetHeight: 30 });
+    this.style = { setProperty() {} };
+    this.classList = { add() {}, remove() {}, toggle() {} };
+  }
+  append(...c) { this.children.push(...c); }
+  replaceChildren(...c) { this.children = c; }
+  addEventListener() {} closest() { return null; } focus() {} blur() {} click() {} dispatchEvent() {}
+}
+const byId = {}, made = [];
+Object.assign(globalThis, {
+  document: {
+    querySelector: s => byId[s] || (byId[s] = new El(s)), querySelectorAll: () => [],
+    createElement: t => { const e = new El(t); made.push(e); return e; },
+    createDocumentFragment: () => new El("#fragment"), addEventListener() {},
+  },
+  location: { hash: "#" + view }, history: { replaceState() {} },
+  ResizeObserver: class { observe() {} }, requestAnimationFrame: () => 0, cancelAnimationFrame() {},
+  innerWidth: 1400, innerHeight: 900,
+});
+vm.runInThisContext(code);
+console.log(JSON.stringify({
+  leaves: made.filter(e => e.className === "cell leaf").length,
+  boxes: made.map(e => e.innerHTML).join("\n"),
+  side: byId["#side"].innerHTML, sub: byId["#sub"].innerHTML, meta: byId["#meta"].innerHTML,
+}));
+"""
+
+
+class ViewerTest(unittest.TestCase):
+    def render(self, data):
+        import tempfile
+        d = tempfile.mkdtemp()
+        out = Path(d) / "aztree.html"
+        aztree.render(data, out)
+        return out
+
+    def test_data_is_embedded_without_breaking_out_of_the_script(self):
+        html = self.render(make_data([("Storage", "</script><!-- x", [1] * 6)])).read_text(encoding="utf-8")
+        self.assertNotIn("__AZTREE_DATA__", html)
+        self.assertEqual(html.count("</script>"), 1)
+        self.assertNotIn("<!--", html)
+
+    def test_page_loads_nothing_from_the_network(self):
+        for pattern in (r"<script[^>]+src", r"<link", r"<img", r"<iframe", r"(?<![a-z])url\(", r"@import", r"fetch\(",
+                        r"XMLHttpRequest", r"WebSocket", r"sendBeacon", r"import\("):
+            self.assertIsNone(aztree.re.search(pattern, TEMPLATE, aztree.re.I), pattern)
+
+    def test_no_aws_vocabulary_left(self):
+        for word in ("Amazon", "USAGE_TYPE", "LINKED_ACCOUNT", "AWSTREE", "UnblendedCost", "awstree-export"):
+            self.assertFalse(word in TEMPLATE, word)
+        self.assertIn("__AZTREE_DATA__", TEMPLATE)
+
+    def run_page(self, data, view):
+        html = self.render(data).read_text(encoding="utf-8")
+        code = html.split("<script>", 1)[1].rsplit("</script>", 1)[0]
+        out = aztree.subprocess.run(["node", "-e", FAKE_DOM], input=json.dumps([code, view]),
+                                    capture_output=True, text=True, encoding="utf-8", timeout=60)
+        self.assertEqual(out.returncode, 0, out.stderr[-2000:])
+        return json.loads(out.stdout)
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_every_view_draws_boxes_and_the_side_panel(self):
+        rec = {"problem": "Right-size underused VMs", "solution": "", "resource": RG + "/providers/microsoft.sql/servers/db1",
+               "resource_name": "db1", "sku": None, "term": None, "annual_savings": 840.0, "currency": "USD",
+               "subscription": "acme-prod", "impact": "High", "resource_type": "x"}
+        data = make_data([
+            ("SQL Database", "vCore", [10] * 6),
+            ("Log Analytics", "Analytics Logs Data Ingestion", [2, 2, 2, 6, 6, 6]),
+        ], resource_rows=[(RG, RG + "/providers/microsoft.sql/servers/db1", [10] * 6)], advisor=[rec])
+        for view, box, count in (("service", "vCore", "2 services · 2 meters"),
+                                 ("subscription", "acme-prod", "1 subscriptions · 2 services"),
+                                 ("region", "us central", "1 regions · 2 services"),
+                                 ("resource", "db1", "1 resource groups · 1 resources")):
+            with self.subTest(view=view):
+                page = self.run_page(data, view)
+                self.assertGreater(page["leaves"], 0, "no boxes drawn")
+                self.assertIn(box, page["boxes"])
+                self.assertIn(count, page["sub"])
+                self.assertIn("Worth a look", page["side"])
+                self.assertIn("Right-size underused VMs", page["side"])
+                self.assertIn("$840/yr", page["side"])
+                self.assertIn("acme-prod", page["meta"])
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_amounts_use_the_billing_currency(self):
+        page = self.run_page(make_data([("Storage", "LRS", [100] * 6)], currency="EUR"), "service")
+        self.assertIn("€300", page["sub"])
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_advisor_without_access_says_so(self):
+        page = self.run_page(make_data([("Storage", "LRS", [1] * 6)], advisor=[], advisor_error="HTTP 403: denied"), "service")
+        self.assertIn("needs Reader", page["side"])
+
+
 class ExplainTest(unittest.TestCase):
     def test_403_mentions_cost_management_reader(self):
         self.assertIn("Cost Management Reader", aztree.explain(aztree.AzureError(403, "denied")))
