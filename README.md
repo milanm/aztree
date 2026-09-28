@@ -25,9 +25,10 @@ The page opens in your browser. It shows the last 30 days, compared with the 30 
 - **Treemap** of spend by service → meter. Press `2` to group by subscription, `3` by region and `4` by resource group → resource.
 - **Color by change** (`c`): red where spend grew, green where it shrank.
 - **Selection panel:** cost, share of the bill, change vs the previous period, monthly pace and a daily chart.
-- **Worth a look:** the fastest-growing costs, plus known Azure money pits (Log Analytics ingestion, data transfer out, NAT and Firewall data processing, Basic and static public IPs, disk snapshots, previous-generation VM sizes, Premium v2 App Service plans and Extended Security Updates).
+- **Worth a look:** one list where news and to-dos take turns. News is costs that grew and one-off spikes (a day far above that meter's usual). To-dos are known money pits, compute left on all week in dev/test resource groups, and, when Advisor isn't available, steady spend a reservation could cut. The first six show; "show all" opens the rest.
+- **Money pits it knows:** Log Analytics ingestion, data transfer out, NAT and Firewall processing, public IPs, snapshots, retiring VM series with their retirement dates, Standard and Premium v2 App Service plans, several Front Door profiles, Front Door Premium, large DTU databases, Azure DevOps seats and hosted jobs, private endpoints, provisioned Cosmos DB throughput, 1-minute alert rules, Azure Cache for Redis (retiring) and Extended Security Updates.
 - **Biggest drops:** what fell since the previous period, including anything that went to zero, so you can see a saving land.
-- **Advisor:** Azure Advisor's cost recommendations (reservations, savings plans, right-sizing), one per resource and SKU. Click one to jump to the resource or subscription it's about.
+- **Advisor:** Azure Advisor's cost recommendations (reservations, savings plans, right-sizing), one per resource and SKU. Reservation and savings-plan tips list the meters they would cover and what those run at a month. Click a tip to jump to its biggest meter, or to the resource it's about.
 - **Export for AI:** a JSON summary to hand to any AI agent (see below).
 
 Click to select, double-click to zoom in, `⌫` to go back up, `/` to filter. Add `#resource`, `#subscription` or `#region` to the page's URL to open that view.
