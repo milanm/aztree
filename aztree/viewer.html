@@ -72,8 +72,8 @@ aside { grid-column: 2; grid-row: 2 / 4; border-left: 1px solid var(--line); bac
   padding: 14px 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 18px; }
 .h { color: var(--dim); font-size: 10.5px; letter-spacing: .8px; text-transform: uppercase; display: flex; justify-content: space-between; }
 .h b { color: var(--accent); font-weight: 500; letter-spacing: 0; }
-.sel-name { font-size: 16px; border-left: 2px solid var(--accent); padding-left: 8px; margin-top: 8px; word-break: break-word; }
-.sel-path { color: var(--dim); margin: 3px 0 0 10px; word-break: break-word; }
+.sel-name { font-size: 16px; margin-top: 8px; word-break: break-word; }
+.sel-path { color: var(--dim); margin-top: 3px; word-break: break-word; }
 .big { font-size: 34px; font-weight: 300; margin-top: 10px; letter-spacing: -.5px; }
 .big small { font-size: 14px; color: var(--muted); margin-left: 2px; }
 .bar { height: 4px; background: #1d2330; border-radius: 2px; margin-top: 8px; overflow: hidden; }
@@ -86,15 +86,16 @@ aside { grid-column: 2; grid-row: 2 / 4; border-left: 1px solid var(--line); bac
 .spark { margin-top: 14px; }
 .spark svg { display: block; width: 100%; height: 46px; }
 .spark .axis { display: flex; justify-content: space-between; color: var(--dim); font-size: 10px; margin-top: 3px; }
-.hint { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 1px 10px; border-left: 2px solid var(--c, var(--accent));
-  padding: 2px 0 2px 9px; cursor: pointer; margin-top: 11px; }
+/* lists read like a statement: plain rows, hairline dividers, a small tag for what kind of row it is */
+.hint { padding: 9px 0; cursor: pointer; }
+.hint + .hint { border-top: 1px solid var(--line); }
 .hint:hover .hn { color: #fff; }
+.ht { display: flex; justify-content: space-between; gap: 10px; }
 .hn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.hv { text-align: right; white-space: nowrap; }
-.hs { color: var(--dim); font-size: 11px; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical;
+.hv { white-space: nowrap; }
+.hs { color: var(--dim); font-size: 11px; margin-top: 3px; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical;
   -webkit-line-clamp: 2; line-clamp: 2; } /* two lines: the reason is the point of a hint */
-.hb { height: 3px; background: #1d2330; border-radius: 2px; align-self: center; width: 80px; overflow: hidden; }
-.hb i { display: block; height: 100%; background: var(--c, var(--accent)); opacity: .8; }
+.tag { color: var(--c, var(--accent)); font-size: 9.5px; letter-spacing: .7px; text-transform: uppercase; margin-right: 6px; }
 .foot { margin-top: auto; border-top: 1px solid var(--line); padding-top: 14px; }
 .foot .h b { color: var(--advisor); }
 .note { color: var(--dim); margin-top: 9px; }
@@ -440,23 +441,19 @@ function renderSide() {
 
   const hints = worthALook();
   if (hints.length) {
-    const shown = state.expanded.hints ? hints : hints.slice(0, SHOWN_HINTS), max = Math.max(...shown.map(h => h.value));
+    const shown = state.expanded.hints ? hints : hints.slice(0, SHOWN_HINTS);
     // a count, not a sum: a dev/test group's total can include meters that are hints of their own
     html += `<section><div class="h">Worth a look <b>${hints.length}</b></div>` +
-      shown.map((h, i) => `<div class="hint" data-hint="${i}" style="--c:${h.c}">
-        <div class="hn" title="${esc(h.n.full)}">${esc(h.title)}</div><div class="hv">${money(h.value)}</div>
-        <div class="hs" title="${esc(h.why)}">${esc(h.why)}</div><div class="hb"><i style="width:${(h.value / max) * 100}%"></i></div></div>`).join("") +
+      shown.map((h, i) => row(`data-hint="${i}"`, h.c, h.title, h.n.full, money(h.value), HINT_TAG[h.h.kind] || "look", esc(h.why), h.why)).join("") +
       showAll("hints", hints.length, SHOWN_HINTS) + `</section>`;
   }
   const drops = biggestDrops();
   if (drops.length) {
-    const max = Math.max(...drops.map(h => -h.d));
     html += `<section><div class="h">Biggest drops <b style="color:var(--down)">${money(drops.reduce((s, h) => s + h.d, 0))}</b></div>` +
-      drops.map((h, i) => `<div class="hint" data-drop="${i}" style="--c:var(--down)">
-        <div class="hn" title="${esc(h.n.full)}">${esc(shortSvc(h.n.parent.key))} · ${esc(h.n.name)}</div><div class="hv">${money(h.n.cur)}</div>
-        <div class="hs">${h.n.cur < 0.005 ? "gone" : "down " + pct(-h.d / h.n.prev)} (${money(h.d)}) vs previous ${DAYS}d</div>
-        <div class="hb"><i style="width:${(-h.d / max) * 100}%"></i></div></div>`).join("") +
-      `</section>`;
+      drops.map((h, i) => {
+        const gone = h.n.cur < 0.005, why = `${gone ? "" : "down " + pct(-h.d / h.n.prev) + " "}(${money(h.d)}) vs previous ${DAYS}d`;
+        return row(`data-drop="${i}"`, "var(--down)", `${shortSvc(h.n.parent.key)} · ${h.n.name}`, h.n.full, money(h.n.cur), gone ? "gone" : "fell", why);
+      }).join("") + `</section>`;
   }
   $("#side").innerHTML = html + advisorPanel();
 }
@@ -464,6 +461,11 @@ function renderSide() {
 // ---------- Azure Advisor: cost recommendations, read by aztree.py (none when run with --no-advisor)
 const TERM = { P1Y: "1-yr term", P3Y: "3-yr term", P5Y: "5-yr term" };
 const SHOWN_RECS = 5, SHOWN_HINTS = 6;
+const HINT_TAG = { grower: "grew", spike: "spike", pit: "fix", devtest: "dev/test", steady: "reserve" };
+// one row of a side-panel list: title and amount on a line, then a small kind tag and the (already escaped) reason
+const row = (attr, color, title, full, value, tag, whyHtml, whyTitle) => `<div class="hint" ${attr} style="--c:${color}">
+  <div class="ht"><span class="hn" title="${esc(full)}">${esc(title)}</span><span class="hv">${value}</span></div>
+  <div class="hs"${whyTitle ? ` title="${esc(whyTitle)}"` : ""}>${tag ? `<span class="tag">${tag}</span>` : ""}${whyHtml}</div></div>`;
 // a long list opens in place: "show all N" / "show fewer"
 const showAll = (list, n, cap) => (n > cap
   ? `<div class="showall" data-more="${list}">${state.expanded[list] ? "show fewer" : `show all ${n}`}</div>` : "");
@@ -483,13 +485,11 @@ function advisorPanel() {
       : `Advisor couldn't be read (${esc(err)}).`;
     return `<section class="foot"><div class="h">Advisor</div><div class="note">${why}</div></section>`;
   }
-  const top = state.expanded.recs ? recs : recs.slice(0, SHOWN_RECS), max = Math.max(...top.map(r => r.annual_savings || 0), 1);
+  const top = state.expanded.recs ? recs : recs.slice(0, SHOWN_RECS);
   return `<section class="foot"><div class="h">Advisor <b>${recs.length} cost tip${recs.length > 1 ? "s" : ""}</b></div>` +
-    top.map((r, i) => `<div class="hint" data-rec="${i}" style="--c:var(--advisor)">
-      <div class="hn" title="${esc(r.solution || r.problem)}">${esc(r.problem)}</div>
-      <div class="hv">${r.annual_savings ? money(r.annual_savings, sym(r.currency || DATA.currency)) + "/yr" : "–"}</div>
-      <div class="hs" title="${esc([r.resource_name, r.sku, Object.hasOwn(TERM, r.term) && TERM[r.term]].filter(Boolean).join(" · "))}">${esc(tipLine(r))}</div>
-      <div class="hb"><i style="width:${((r.annual_savings || 0) / max) * 100}%"></i></div></div>`).join("") +
+    top.map((r, i) => row(`data-rec="${i}"`, "var(--advisor)", r.problem, r.solution || r.problem,
+      r.annual_savings ? money(r.annual_savings, sym(r.currency || DATA.currency)) + "/yr" : "–", null, esc(tipLine(r)),
+      [r.resource_name, r.sku, Object.hasOwn(TERM, r.term) && TERM[r.term]].filter(Boolean).join(" · "))).join("") +
     showAll("recs", recs.length, SHOWN_RECS) + `</section>`;
 }
 

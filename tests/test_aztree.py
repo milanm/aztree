@@ -1583,6 +1583,31 @@ class Batch3ReviewTest(unittest.TestCase):
     render = ViewerTest.render
 
 
+class LedgerStyleTest(unittest.TestCase):
+    """The side panel reads like a statement: plain rows, hairline dividers, a small kind tag, no accent bars."""
+
+    def test_no_accent_bars_on_rows_or_the_selection_title(self):
+        for rule in (".hint", ".sel-name"):
+            block = aztree.re.search(aztree.re.escape(rule) + r"\s*\{([^}]*)\}", TEMPLATE)
+            self.assertIsNotNone(block, rule)
+            self.assertNotIn("border-left", block.group(1), rule)
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_each_row_says_what_kind_of_hint_it_is(self):
+        page = ViewerTest.run_page(self, make_data(HintsTest.GROWING), "service")
+        self.assertIn('<span class="tag">grew</span>', page["side"])
+        self.assertIn('<span class="tag">fix</span>', page["side"])
+        self.assertNotIn('class="hb"', page["side"])  # no share bars in the rows either
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_drops_say_fell_or_gone(self):
+        page = ViewerTest.run_page(self, make_data(Batch1Test.DROPPED), "service")
+        self.assertIn('<span class="tag">fell</span>', page["side"])
+        self.assertIn('<span class="tag">gone</span>', page["side"])
+
+    render = ViewerTest.render
+
+
 @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
 class ShowAllTest(unittest.TestCase):
     render = ViewerTest.render
