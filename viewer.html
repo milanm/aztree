@@ -385,13 +385,17 @@ function renderChrome(base) {
   const legend = state.change
     ? [["--down", "down"], ["--neutral", "flat"], ["--up", "up / new"]].map(([c, l]) => `<span><i style="background:var(${c})"></i>${l}</span>`).join("")
     : CATS.map(([k, l]) => `<span><i style="background:var(--${k})"></i>${l}</span>`).join("");
-  const fallback = state.view === "resource" && DATA.resource_fallback?.length
-    ? `<span title="too many resources to list one by one">by service in ${esc(DATA.resource_fallback.join(", "))}</span>` : "";
+  const fallback = totalsOnly()
+    ? `<span title="too many resources for a daily series: each resource has one total per period">period totals for ${esc(DATA.resource_fallback.join(", "))}</span>` : "";
   $("#sub").innerHTML = `<span><b>${money(root.cur)}</b> · ${period()}</span><span>${root.children.length} ${DIM[A].many} · ${leaves} ${DIM[B].many}</span>
     ${fallback}${creditNote(root, "span")}${state.filter ? `<span>filter “${esc(state.filter)}” · ${pct(root.cur / grand)} of bill</span>` : ""}<div class="legend">${legend}</div>`;
 }
 
+// a subscription with too many resources gets one total per resource and period, so no daily chart in that view
+const totalsOnly = () => state.view === "resource" && DATA.resource_fallback?.length > 0;
+
 function spark(n) {
+  if (totalsOnly()) return `<div class="note">No daily chart here: this view has period totals only (too many resources for daily detail).</div>`;
   const max = Math.max(...n.daily, 0.0001), bw = 100 / N;
   const bars = Array.from(n.daily, (v, i) => {
     const h = Math.max(0, (v / max) * 44);

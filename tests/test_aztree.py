@@ -243,14 +243,32 @@ class Router:
         refused = (self.reject | set(self.reject_for.get(scope, ()))) & set(aggs)
         if refused:
             return error(400, "BadRequest", f"Invalid aggregation {sorted(refused)}")
-        if dims in self.explode:
+        daily = body["dataset"].get("granularity") == "Daily"
+        if dims in self.explode and daily:
             return page(["Cost"], [], next_link=url.split("&")[0] + "&$skiptoken=more")
+        if not daily:  # no granularity: Azure answers one row per group, summed over the whole time period
+            return self.totals(body, dims, aggs, scope)
         cols = aggs + ["UsageDate", *dims, "Currency"]
         rows = []
         for date, a, b, cost, cur, usd in self.tables.get(dims, {}).get(scope, []):
             usd = usd if usd is not None else cost
             vals = {"Cost": cost, "CostUSD": usd, "PreTaxCost": cost, "PreTaxCostUSD": usd, "UsageDate": date,
                     dims[0]: a, dims[1]: b, "Currency": cur}
+            rows.append([vals[c] for c in cols])
+        return page(cols, rows)
+
+    def totals(self, body, dims, aggs, scope):
+        start, end = (int(body["timePeriod"][k][:10].replace("-", "")) for k in ("from", "to"))
+        sums = {}
+        for date, a, b, cost, cur, usd in self.tables.get(dims, {}).get(scope, []):
+            if start <= date <= end:
+                acc = sums.setdefault((a, b, cur), [0.0, 0.0])
+                acc[0] += cost
+                acc[1] += usd if usd is not None else cost
+        cols = aggs + [*dims, "Currency"]
+        rows = []
+        for (a, b, cur), (cost, usd) in sums.items():
+            vals = {"Cost": cost, "CostUSD": usd, "PreTaxCost": cost, "PreTaxCostUSD": usd, dims[0]: a, dims[1]: b, "Currency": cur}
             rows.append([vals[c] for c in cols])
         return page(cols, rows)
 
@@ -334,13 +352,19 @@ class FetchTest(unittest.TestCase):
         self.assertEqual(names["/subscriptions/aaaa-1/resourcegroups/rg-app"], "rg-app · acme-prod")
         self.assertEqual(names["/subscriptions/bbbb-2/resourcegroups/rg-app"], "rg-app · acme-dev")
 
-    def test_resource_view_falls_back_to_services_when_paging_explodes(self):
+    def test_resource_view_falls_back_to_period_totals_when_paging_explodes(self):
         tables = dict(ONE_SUB)
-        tables[("ResourceGroupName", "ServiceName")] = {"/subscriptions/aaaa-1": [
-            (20260925, "rg-app", "Azure App Service", 5.0, "USD", None)]}
-        data, _ = fetch(tables, explode={("ResourceGroupName", "ResourceId")})
-        self.assertEqual(list(rows_of(data, "resource")), [("/subscriptions/aaaa-1/resourcegroups/rg-app", "Azure App Service")])
+        tables[("ResourceGroupName", "ResourceId")] = {"/subscriptions/aaaa-1": [
+            (20260922, "rg-app", RID, 4.0, "USD", None),   # previous period
+            (20260925, "rg-app", RID, 5.0, "USD", None),   # current period
+            (20260927, "rg-app", RID, 1.0, "USD", None)]}
+        data, router = fetch(tables, explode={("ResourceGroupName", "ResourceId")})
+        # every resource stays, with the right totals for each period: previous on its first day, current on its first day
+        self.assertEqual(rows_of(data, "resource")[("/subscriptions/aaaa-1/resourcegroups/rg-app", RID)], [4.0, 0, 0, 6.0, 0, 0])
         self.assertEqual(data["resource_fallback"], ["acme-prod"])
+        totals = [b["timePeriod"] for b in router.bodies if "granularity" not in b["dataset"]]
+        self.assertEqual(totals, [{"from": "2026-09-22T00:00:00Z", "to": "2026-09-24T23:59:59Z"},
+                                  {"from": "2026-09-25T00:00:00Z", "to": "2026-09-27T23:59:59Z"}])
 
     def test_one_currency_is_drawn_in_that_currency(self):
         tables = {("ServiceName", "Meter"): {"/subscriptions/aaaa-1": [(20260925, "Storage", "LRS", 10.0, "EUR", 11.0)]}}
@@ -1130,6 +1154,24 @@ class Batch1Test(unittest.TestCase):
     def test_clicking_a_gone_drop_shows_its_numbers(self):
         page = ViewerTest.run_page(self, make_data(self.DROPPED), "service", click="[data-drop]:1")
         self.assertIn('<div class="sel-name">Old disk</div>', page["side"])
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_totals_only_resource_view_says_so_instead_of_a_chart(self):
+        data = make_data([("Storage", "LRS", [5] * 6)], resource_rows=[(RG, RG + "/providers/x/y/z", [3, 0, 0, 4, 0, 0])],
+                         resource_fallback=["acme-prod"])
+        page = ViewerTest.run_page(self, data, "resource")
+        self.assertIn("period totals", page["side"])
+        self.assertNotIn("<svg", page["side"])
+        self.assertIn("period totals", page["sub"])
+        self.assertIn("<svg", ViewerTest.run_page(self, data, "service")["side"])  # other views keep their chart
+
+    def test_verbose_counts_pages(self):
+        lines = []
+        nxt = "https://management.azure.com/subscriptions/s1/providers/Microsoft.CostManagement/query?x=1&$skiptoken=a"
+        send = FakeSend(page(["Cost"], [], next_link=nxt), page(["Cost"], []))
+        aztree.query(client(send, verbose=True, log=lines.append), "/subscriptions/s1", "2026-09-22", "2026-09-27",
+                     ["ResourceGroupName", "ResourceId"], "ActualCost")
+        self.assertTrue(any("2 pages" in line for line in lines), lines)
 
     render = ViewerTest.render
 

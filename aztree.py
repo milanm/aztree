@@ -215,18 +215,22 @@ def explain(e):
     return f"Azure error: {e}" + ("\n  -> " + "\n  -> ".join(hints) if hints else "")
 
 
-def query(az, scope, start, end, groupings, metric, aggs=("Cost", "CostUSD"), max_pages=None, tenant=None):
-    """One Cost Management query at daily granularity. `start` and `end` are ISO dates, both inclusive.
+def query(az, scope, start, end, groupings, metric, aggs=("Cost", "CostUSD"), max_pages=None, tenant=None,
+          granularity="Daily"):
+    """One Cost Management query. `start` and `end` are ISO dates, both inclusive. With granularity=None, Azure
+    sums each group over the whole period: one row per group instead of one per group per day.
     Returns every row of every page as a dict keyed by column name."""
+    dataset = {
+        "aggregation": {f"total{a}": {"name": a, "function": "Sum"} for a in aggs},
+        "grouping": [{"type": "Dimension", "name": g} for g in groupings],
+    }
+    if granularity:
+        dataset["granularity"] = granularity
     body = {
         "type": metric,
         "timeframe": "Custom",
         "timePeriod": {"from": f"{start}T00:00:00Z", "to": f"{end}T23:59:59Z"},
-        "dataset": {
-            "granularity": "Daily",
-            "aggregation": {f"total{a}": {"name": a, "function": "Sum"} for a in aggs},
-            "grouping": [{"type": "Dimension", "name": g} for g in groupings],
-        },
+        "dataset": dataset,
     }
     url = f"{scope}/providers/Microsoft.CostManagement/query?api-version={API_VERSION}"
     rows, pages = [], 0
@@ -240,6 +244,8 @@ def query(az, scope, start, end, groupings, metric, aggs=("Cost", "CostUSD"), ma
             raise AzureError(200, f"Cost Management answered without a {aggs[0]} column (columns: {', '.join(cols)})")
         rows += [dict(zip(cols, r)) for r in props.get("rows", [])]
         url = props.get("nextLink")
+    if getattr(az, "verbose", False):
+        az.log(f"    ({pages} page{'s' if pages != 1 else ''}, {len(rows)} rows)")
     return rows
 
 
@@ -286,11 +292,11 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None):
     twins = Counter(t["name"] for t in targets)  # "Pay-As-You-Go" twice needs the id to tell them apart
     targets = [{**t, "name": f"{t['name']} ({t['id'][:8]})"} if twins[t["name"]] > 1 else t for t in targets]
 
-    def run(target, groupings, **kw):
+    def run(target, groupings, start=None, end=None, **kw):
         aggs = columns.setdefault(target["id"], list(AGGREGATIONS))
         while True:
             try:
-                return query(az, target["scope"], dates[0], dates[-1], groupings, metric, aggs[0],
+                return query(az, target["scope"], start or dates[0], end or dates[-1], groupings, metric, aggs[0],
                              tenant=target.get("tenant"), **kw)
             except AzureError as e:
                 # step down only when Azure objects to the cost columns; any other 400 is a real error
@@ -299,8 +305,9 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None):
                     raise
                 aggs.pop(0)
 
-    def add(view, key, r):
-        i = index.get(usage_day(r.get("UsageDate")))
+    def add(view, key, r, day=None):
+        """`day` is set for period totals, which have no UsageDate: they land on their period's first day."""
+        i = day if day is not None else index.get(usage_day(r.get("UsageDate")))
         if i is not None:
             cost, cost_usd = r.get("Cost", r.get("PreTaxCost")), r.get("CostUSD", r.get("PreTaxCostUSD"))
             raw[view].append((key, i, cost or 0.0, cost_usd))
@@ -316,17 +323,20 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None):
 
         log(f"  {t['name']}: resources ...")
         try:
-            rows, leaf = run(t, VIEWS["resource"], max_pages=MAX_RESOURCE_PAGES), "ResourceId"
+            rows = [(r, None) for r in run(t, VIEWS["resource"], max_pages=MAX_RESOURCE_PAGES)]
         except TooManyPages:
-            log(f"  {t['name']}: too many resources to list one by one, grouping them by service instead")
-            rows, leaf = run(t, ["ResourceGroupName", "ServiceName"]), "ServiceName"
+            # too many resources x days: read one total per resource and period instead (two small queries)
+            log(f"  {t['name']}: too many resources for daily detail, reading period totals instead")
+            prev = run(t, VIEWS["resource"], start=dates[0], end=dates[days - 1], granularity=None)
+            cur = run(t, VIEWS["resource"], start=dates[days], end=dates[-1], granularity=None)
+            rows = [(r, 0) for r in prev] + [(r, days) for r in cur]
             fallback.append(t["name"])
-        for r in rows:
+        for r, day in rows:
             rg, rid = r.get("ResourceGroupName") or "", (r.get("ResourceId") or "").lower()
             key = group_key(t, rg, rid)
             label = rg or "(no resource group)"
             names["resource"][key] = f"{label} · {t['name']}" if len(targets) > 1 else label
-            add("resource", (key, (rid or "(no resource)") if leaf == "ResourceId" else service_of(r)), r)
+            add("resource", (key, rid or "(no resource)"), r, day)
 
         log(f"  {t['name']}: regions ...")
         for r in run(t, VIEWS["region"]):
