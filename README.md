@@ -1,6 +1,6 @@
 # aztree
 
-**Where did my Azure money go?** aztree reads your Azure costs and draws them as a treemap: big box, big cost. It's a port of [awstree](https://github.com/petricbranko/awstree) by Branko Petric, which took the idea from [disktree](https://x.com/tobi/status/2103251521223921739) by [Tobi Lütke](https://x.com/tobi). Same idea again, pointed at an Azure subscription.
+**Where did my Azure money go?** aztree reads your Azure costs and draws them as a treemap: big box, big cost.
 
 ![aztree showing a demo Azure bill as a treemap](https://raw.githubusercontent.com/milanm/aztree/main/docs/screenshot.png)
 
