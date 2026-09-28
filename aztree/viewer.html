@@ -82,6 +82,8 @@ aside { grid-column: 2; grid-row: 2 / 4; border-left: 1px solid var(--line); bac
 .h { color: var(--dim); font-size: 10.5px; letter-spacing: .8px; text-transform: uppercase; display: flex; justify-content: space-between; }
 .h b { color: var(--accent); font-weight: 500; letter-spacing: 0; }
 .sel-name { font-size: 16px; margin-top: 8px; word-break: break-word; }
+.sel-name a { color: inherit; text-decoration: none; }
+.sel-name a:hover { color: #fff; text-decoration: underline; }
 .sel-path { color: var(--dim); margin-top: 3px; word-break: break-word; }
 .big { font-size: 34px; font-weight: 300; margin-top: 10px; letter-spacing: -.5px; }
 .big small { font-size: 14px; color: var(--muted); margin-left: 2px; }
@@ -481,6 +483,15 @@ function spark(n) {
     <div class="axis"><span>${day(DATA.days[0])}</span><span>previous ${DAYS}d | last ${DAYS}d</span><span>${day(DATA.days[N - 1])}</span></div></div>`;
 }
 
+// resources and resource groups are keyed by ARM id, subscriptions by bare GUID; the demo's ids are made up
+const armId = n => n.kind === "root" || n.more || DATA.demo ? null
+  : n.dim === "SubscriptionId" && /^[0-9a-f-]{36}$/i.test(n.key) ? `/subscriptions/${n.key}`
+  : /^\/subscriptions\/[^/]+/i.test(n.key) ? n.key : null;
+const portalLink = (n, html) => {
+  const id = armId(n);
+  return id && DATA.portal ? `<a href="${esc(DATA.portal)}/#resource${esc(encodeURI(id))}" target="_blank" rel="noopener noreferrer" title="open in the Azure portal">${html}</a>` : html;
+};
+
 function renderSide() {
   const n = state.sel || zoomed() || root;
   const v = DATA.views[state.view], [A, B] = v.dims;
@@ -500,7 +511,7 @@ function renderSide() {
       <div><span>category</span>${n.kind === "root" ? "–" : (CATS.find(c => c[0] === category(n)) || [, "–"])[1]}</div>`;
 
   let html = `<section><div class="h">Selection</div>
-    <div class="sel-name">${esc(title)}</div><div class="sel-path">${esc(path)}</div>
+    <div class="sel-name">${portalLink(n, esc(title))}</div><div class="sel-path">${esc(path)}</div>
     <div class="big">${bigMoney(n.cur)}</div><div style="color:var(--dim)">last ${DAYS} days · ${period()}</div>${creditNote(n, "div")}
     <div class="bar"><i style="width:${Math.min(100, share * 100)}%"></i></div>
     <div class="stats">

@@ -1462,6 +1462,18 @@ class ReviewFixesTest(unittest.TestCase):
         self.assertIn('<div class="sel-name">acme-prod</div>', page["side"])
 
     @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_a_subscription_links_to_the_portal(self):
+        sub = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
+        rec = {"problem": "Consider a savings plan", "solution": "", "resource": f"/subscriptions/{sub}",
+               "resource_name": "acme-prod", "sku": None, "term": None, "annual_savings": 3120.0,
+               "currency": "USD", "subscription": "acme-prod", "impact": "High", "resource_type": None}
+        data = make_data([("SQL Database", "vCore", [10] * 6)], advisor=[rec])
+        data["views"]["subscription"] = {"dims": ["SubscriptionId", "ServiceName"], "names": {sub: "acme-prod"},
+                                         "rows": [{"k": [sub, "SQL Database"], "d": [10] * 6}]}
+        page = ViewerTest.run_page(self, data, "service", click="[data-rec]:0")
+        self.assertIn(f'<div class="sel-name"><a href="{aztree.PORTAL}/#resource/subscriptions/{sub}"', page["side"])
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
     def test_advisor_errors_other_than_access_say_what_happened(self):
         page = ViewerTest.run_page(self, make_data([("Storage", "LRS", [1] * 6)], advisor=[], advisor_error="HTTP 500"), "service")
         self.assertNotIn("needs Reader", page["side"])
@@ -1875,7 +1887,9 @@ class DevTestTest(unittest.TestCase):
         self.assertIn("always-on", page["side"])
         page = ViewerTest.run_page(self, self.data(), "service", click="[data-hint]:0")
         self.assertIn("all resource groups", page["crumbs"])
-        self.assertIn('<div class="sel-name">tms-dev-rg</div>', page["side"])
+        self.assertIn(f'<a href="{aztree.PORTAL}/#resource/subscriptions/aaaa-1/resourcegroups/tms-dev-rg" '
+                      'target="_blank" rel="noopener noreferrer" title="open in the Azure portal">tms-dev-rg</a></div>',
+                      page["side"])
 
     render = ViewerTest.render
 
@@ -2167,7 +2181,9 @@ class Batch4PageTest(unittest.TestCase):
         self.assertIn('title="' + RG + '/providers/microsoft.compute/disks/d1">d1</span>', page["side"])
         page = self.run_page(self.idle_data(), "service", click="[data-hint]:0")
         self.assertIn("all resource groups", page["crumbs"])
-        self.assertIn('<div class="sel-name">d1</div>', page["side"])
+        self.assertIn(f'<div class="sel-name"><a href="{aztree.PORTAL}/#resource' + RG
+                      + '/providers/microsoft.compute/disks/d1" target="_blank"', page["side"])
+        self.assertIn('title="open in the Azure portal">d1</a></div>', page["side"])
 
     def test_graph_errors_get_a_note(self):
         page = self.run_page(make_data([("Storage", "LRS", [5] * 6)], graph=[], graph_error="HTTP 403"), "service")

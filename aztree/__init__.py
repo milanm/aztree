@@ -39,6 +39,7 @@ def template():
     return resources.files(__name__).joinpath("viewer.html").read_text(encoding="utf-8")
 
 ARM = "https://management.azure.com"
+PORTAL = "https://portal.azure.com"
 API_VERSION = "2025-03-01"  # Microsoft.CostManagement/query
 MAX_TRIES = 8  # per request, when Cost Management throttles us
 MAX_RESOURCE_PAGES = 10  # past this, the resource view reads one total per resource and period instead of daily rows
@@ -1202,7 +1203,7 @@ def export(data, path):
 
 def render(data, out):
     html = template()
-    page = {**data, "export": summarize(data)}  # the page reads its hints from the export: one source of truth
+    page = {**data, "export": summarize(data), "portal": PORTAL}  # the page reads its hints from the export: one source of truth
     # < keeps names like "</script>" or "<!--" from ending the script block early
     blob = json.dumps(page, separators=(",", ":"), ensure_ascii=False).replace("<", "\\u003c")
     out.write_text(html.replace("__AZTREE_DATA__", blob), encoding="utf-8")
