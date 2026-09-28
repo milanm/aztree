@@ -627,10 +627,25 @@ function select(n) {
   if (n?._el?.isConnected) n._el.classList.add("sel");
   renderSide(); remember(false);
 }
+// open and up grow the group into the map, or shrink it back, like disktree; the whole map moves because render()
+// rebuilt every box. Transforms don't resize the map, so the ResizeObserver stays quiet.
+let anim;
+const rectOf = n => n?._el && { x: parseFloat(n._el.style.left), y: parseFloat(n._el.style.top),
+  w: parseFloat(n._el.style.width), h: parseFloat(n._el.style.height) };
+function animateZoom(r, opening) {
+  const W = map.clientWidth, H = map.clientHeight;
+  if (!r || !(r.w >= 1 && r.h >= 1) || !map.animate || globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+  const sx = r.w / W, sy = r.h / H;
+  const small = `translate(${r.x}px, ${r.y}px) scale(${sx}, ${sy})`, big = `translate(${-r.x / sx}px, ${-r.y / sy}px) scale(${1 / sx}, ${1 / sy})`;
+  anim?.cancel();
+  anim = map.animate([{ transform: opening ? small : big }, { transform: "none" }],
+    { duration: Math.min(310, 130 + 45 * Math.log2(1 / (sx * sy))), easing: "cubic-bezier(.33, 1, .68, 1)" });
+}
 function open(n) {
   const g = n?.kind === "leaf" ? n.parent : n;
   if (g?.kind !== "group" || state.zoom === g.key) return; // already inside: a second click is not a second zoom
-  state.zoom = g.key; render(); remember(true);
+  const from = rectOf(g);
+  state.zoom = g.key; render(); remember(true); animateZoom(from, true);
 }
 // Tab walks the drawn boxes by size among the selection's siblings (disktree: scanning for space is this walk)
 function step(dir) {
@@ -639,8 +654,11 @@ function step(dir) {
   const i = peers.indexOf(state.sel);
   select(peers[i < 0 ? 0 : Math.max(0, Math.min(peers.length - 1, i + dir))]);
 }
-function up() {
-  if (state.zoom !== null) { const g = zoomed(); state.zoom = null; state.sel = g || null; render(); remember(true); }
+function up(animate = true) {
+  if (state.zoom !== null) {
+    const g = zoomed(); state.zoom = null; state.sel = g || null; render(); remember(true);
+    if (animate) animateZoom(rectOf(g), false); // g's box in the top-level map, just drawn
+  }
   else if (state.sel) select(null);
 }
 function clearFilter() { state.filter = ""; state.collapsed = false; $("#filter").value = ""; }
@@ -675,7 +693,7 @@ $("#viewkeys").innerHTML = VIEW_KEYS.map((v, i) => (DATA.views[v] ? `<kbd>${i + 
 map.addEventListener("click", e => { const c = e.target.closest(".cell"), n = c ? c._n : null; n && n === state.sel ? open(n) : select(n); });
 $("#views").addEventListener("click", e => e.target.dataset.v && setView(e.target.dataset.v));
 $("#change").addEventListener("change", e => { state.change = e.target.checked; render(); });
-$("#crumbs").addEventListener("click", e => { if (e.target.closest("[data-up]")) up(); });
+$("#crumbs").addEventListener("click", e => { if (e.target.closest("[data-up]")) up(false); }); // a crumb jump doesn't animate
 // typing dims what doesn't match; the map keeps its shape, and the zoom and selection stay
 $("#filter").addEventListener("input", e => { state.filter = e.target.value.trim(); state.collapsed = false; rebuild(); render(); });
 $("#side").addEventListener("click", e => {
@@ -755,7 +773,7 @@ $("#meta").innerHTML = (DATA.demo ? `<span class="badge">demo data</span> ` : ""
 let raf;
 render();
 remember(false);
-new ResizeObserver(() => { cancelAnimationFrame(raf); raf = requestAnimationFrame(render); }).observe(map);
+new ResizeObserver(() => { anim?.cancel(); cancelAnimationFrame(raf); raf = requestAnimationFrame(render); }).observe(map);
 </script>
 </body>
 </html>

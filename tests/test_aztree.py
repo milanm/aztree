@@ -2330,6 +2330,23 @@ class HistoryTest(unittest.TestCase):
         self.assertEqual(page["history"][-1][1]["view"], "service")
 
 
+@unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+class ZoomAnimationTest(unittest.TestCase):
+    render = ViewerTest.render
+    run_page = ViewerTest.run_page
+
+    def test_opening_and_going_up_animate_the_map(self):
+        data = make_data(FilterDimTest.DATA)
+        opened = [{"map": "click", "name": "Storage"}] * 2
+        self.assertEqual(self.run_page(data, "service", click=opened)["animations"], 1)
+        self.assertEqual(self.run_page(data, "service", click=opened + [{"press": "Backspace"}])["animations"], 2)
+        self.assertEqual(self.run_page(data, "service", click="[data-hint]:0")["animations"], 0)  # a jump doesn't
+
+    def test_reduced_motion_and_resizing_stop_it(self):
+        self.assertIn("prefers-reduced-motion: reduce", TEMPLATE)
+        self.assertRegex(TEMPLATE, r"new ResizeObserver\(\(\) => \{ anim\?\.cancel\(\);")
+
+
 class ExplainTest(unittest.TestCase):
     def test_bad_response_is_not_blamed_on_the_network(self):
         send = FakeSend(page(["UsageDate", "ServiceName", "Meter"], [[20260925, "Storage", "LRS"]]))
