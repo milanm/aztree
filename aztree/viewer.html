@@ -454,7 +454,7 @@ function renderSide() {
   const hints = worthALook(), gerr = DATA.graph_error;
   // Resource Graph checks that couldn't run: say so where their findings would be
   const graphNote = !gerr ? "" : `<div class="note">${/^HTTP 40[13]\b/.test(gerr)
-    ? "Resource Graph checks need Reader, so they didn't run." : `Resource Graph checks didn't run (${esc(gerr)}).`}</div>`;
+    ? "Resource Graph checks need Reader, and didn't run where it's missing." : `Resource Graph checks didn't run everywhere (${esc(gerr)}).`}</div>`;
   if (hints.length || graphNote) {
     const shown = state.expanded.hints ? hints : hints.slice(0, SHOWN_HINTS);
     // a count, not a sum: a dev/test group's total can include meters that are hints of their own

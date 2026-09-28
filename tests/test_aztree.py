@@ -326,7 +326,7 @@ class Router:
         return 200, {}, json.dumps(out).encode()
 
 
-RID ="/subscriptions/aaaa-1/resourcegroups/rg-app/providers/microsoft.web/sites/shop"
+RID = "/subscriptions/aaaa-1/resourcegroups/rg-app/providers/microsoft.web/sites/shop"
 ONE_SUB = {
     ("ServiceName", "Meter"): {"/subscriptions/aaaa-1": [
         (20260922, "Storage", "Hot LRS Data Stored", 1.0, "USD", None),
@@ -625,6 +625,49 @@ class GraphTest(unittest.TestCase):
                             "ActualCost", advisor=False, log=lambda *a: None, today=TODAY)
         self.assertIsNone(data["graph"])
         self.assertEqual(self.graph_calls(router), [])
+
+
+class Batch4ReviewTest(unittest.TestCase):
+    """Findings from the batch 4 review, each reproduced before it was fixed."""
+
+    def test_one_tenant_without_access_keeps_the_other_tenants_findings(self):
+        router = Router({}, findings=[[IDLE_DISK]])
+
+        def send(method, url, data, headers):
+            if "ResourceGraph" in url and headers["Authorization"] == "Bearer tok-t-two":
+                return error(403, "AuthorizationFailed", "no Resource Graph in this tenant")
+            return router(method, url, data, headers)
+
+        az = aztree.Azure(lambda tenant: f"tok-{tenant}", send=send, sleep=lambda s: None, log=lambda *a: None)
+        targets = [aztree.subscription_target({"id": "aaaa-1", "name": "a", "tenant": "t-one"}),
+                   aztree.subscription_target({"id": "bbbb-2", "name": "b", "tenant": "t-two"})]
+        data = aztree.fetch(az, targets, 3, "ActualCost", advisor=False, log=lambda *a: None, today=TODAY)
+        self.assertEqual((data["graph"], data["graph_error"]), ([IDLE_DISK], "HTTP 403"))
+
+    def test_a_rejected_tag_query_does_not_change_the_cost_column(self):
+        # the columns were settled by the first query; a later 400 that mentions a column is that query's own problem
+        data, router = fetch(ONE_SUB, tag="environment", forecasts={"/subscriptions/aaaa-1": ForecastTest.SEP},
+                             fail={("tag:environment", "ServiceName"): "Invalid query definition: Invalid column name 'TagKey'"})
+        self.assertEqual(len([c for c in router.calls if c[1] == ("tag:environment", "ServiceName")]), 1)
+        body = next(c[2] for c in router.other if c[0] == "forecast")
+        self.assertEqual(body["dataset"]["aggregation"]["totalCost"]["name"], "Cost")
+        self.assertNotIn("tag", data["views"])
+
+    def test_a_forecast_without_the_cost_column_is_no_forecast(self):
+        router = Router(ONE_SUB)
+
+        def send(method, url, data, headers):
+            if "/forecast" in url:  # asked for Cost, answered with another column: not a $0 forecast
+                return page(["PreTaxCost", "UsageDate", "CostStatus", "Currency"], [[100.0, 20260901, "Actual", "USD"]])
+            return router(method, url, data, headers)
+
+        data = aztree.fetch(client(send), [aztree.subscription_target(PROD)], 3, "ActualCost", advisor=False,
+                            log=lambda *a: None, today=TODAY)
+        self.assertIsNone(data["forecast"])
+        self.assertIn("acme-prod", data["forecast_note"])
+
+    def test_the_ai_instructions_keep_their_spacing(self):
+        self.assertIn("Please: 1) explain", aztree.AI_INSTRUCTIONS)
 
 
 # (service, meter, words expected in the reason, or None for "no flag"). Meter names are from real bills.
@@ -961,7 +1004,7 @@ class Batch4ExportTest(unittest.TestCase):
             self.assertIn(word, aztree.AI_INSTRUCTIONS)
 
 
-TEMPLATE =(REPO / "aztree" / "viewer.html").read_text(encoding="utf-8")
+TEMPLATE = (REPO / "aztree" / "viewer.html").read_text(encoding="utf-8")
 
 # Runs the viewer's script in Node against a bare-bones DOM: enough to prove each view draws boxes
 # and fills the side panel, without a browser.
@@ -2088,7 +2131,7 @@ class Batch4PageTest(unittest.TestCase):
         page = self.run_page(make_data([("Storage", "LRS", [5] * 6)], graph=[], graph_error="HTTP 403"), "service")
         self.assertIn("Resource Graph checks need Reader", page["side"])
         page = self.run_page(make_data([("Storage", "LRS", [5] * 6)], graph=[], graph_error="HTTP 500"), "service")
-        self.assertIn("didn't run (HTTP 500)", page["side"])
+        self.assertIn("didn't run everywhere (HTTP 500)", page["side"])  # a tenant may have answered
 
 
 class ExplainTest(unittest.TestCase):

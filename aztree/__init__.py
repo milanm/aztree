@@ -308,6 +308,8 @@ def month_forecast(az, target, metric, today, column="Cost"):
     while url:
         props = az.call("POST", url, body, tenant=target.get("tenant")).get("properties", {})
         cols = [c["name"] for c in props.get("columns", [])]
+        if cols and column not in cols:  # summing a missing column would show a $0 forecast as if it were real
+            raise AzureError(200, f"the forecast answered without a {column} column (columns: {', '.join(cols)})")
         for values in props.get("rows", []):
             r = dict(zip(cols, values))
             if r.get("CostStatus") in sums:
@@ -334,24 +336,31 @@ IDLE_QUERY = """resources
 | project check, id = tolower(id), name, resourceGroup, subscriptionId"""
 
 
-def graph_findings(az, targets):
+def graph_findings(az, targets, log=print):
     """What IDLE_QUERY finds in Azure Resource Graph: one query per tenant (tokens are per tenant) for all of
-    that tenant's subscriptions, at most MAX_GRAPH_ROWS rows in all."""
+    that tenant's subscriptions, at most MAX_GRAPH_ROWS rows in all. A tenant that says no is skipped, like a
+    subscription without Advisor access: returns what the others found and the first failure's status, or None."""
     tenants = {}
     for t in targets:
         tenants.setdefault(t.get("tenant"), []).append(t["id"])
-    found = []
+    found, error = [], None
     for tenant, subs in tenants.items():
         options = {"resultFormat": "objectArray", "$top": 1000}
-        while len(found) < MAX_GRAPH_ROWS:
-            page = az.call("POST", f"/providers/Microsoft.ResourceGraph/resources?api-version={GRAPH_API}",
-                           {"subscriptions": subs, "query": IDLE_QUERY, "options": options}, tenant=tenant)
-            found += [{k: row.get(k) for k in ("check", "id", "name", "resourceGroup", "subscriptionId")}
-                      for row in page.get("data", [])]
-            if not page.get("$skipToken"):
-                break
-            options = {**options, "$skipToken": page["$skipToken"]}
-    return found[:MAX_GRAPH_ROWS]
+        try:
+            while len(found) < MAX_GRAPH_ROWS:
+                page = az.call("POST", f"/providers/Microsoft.ResourceGraph/resources?api-version={GRAPH_API}",
+                               {"subscriptions": subs, "query": IDLE_QUERY, "options": options}, tenant=tenant)
+                found += [{k: row.get(k) for k in ("check", "id", "name", "resourceGroup", "subscriptionId")}
+                          for row in page.get("data", [])]
+                if not page.get("$skipToken"):
+                    break
+                options = {**options, "$skipToken": page["$skipToken"]}
+        except Exception as e:  # needs Reader, like Advisor; the cost data alone is still worth a page
+            # keep only the status: Azure's 403 text names the caller, and this lands in the AI export
+            error = error or (f"HTTP {e.status}" if isinstance(e, AzureError) else type(e).__name__)
+            log(f"  skipped the Resource Graph checks for {len(subs)} subscription{'s' if len(subs) > 1 else ''} ({e}). "
+                "Reader on the subscription fixes access errors; --no-graph hides this.")
+    return found[:MAX_GRAPH_ROWS], error
 
 
 # ---------------------------------------------------------------- reading costs
@@ -393,6 +402,7 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None, tag=No
     raw = {v: [] for v in [*VIEWS, "tag"]}  # (key, day index, cost, cost in USD), folded once the currency is known
     names = {v: {} for v in VIEWS}
     columns = {}  # target id -> cost columns that target accepts, best first; every subscription starts at the top
+    settled = set()  # targets whose columns a query has already worked with
     subs, fallback = [], []
     forecasts, no_forecast = [], []
     twins = Counter(t["name"] for t in targets)  # "Pay-As-You-Go" twice needs the id to tell them apart
@@ -403,12 +413,15 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None, tag=No
         aggs = columns.setdefault(target["id"], list(AGGREGATIONS))
         while True:
             try:
-                return query(az, target["scope"], start or dates[0], end or dates[-1], groupings, metric, aggs[0],
+                rows = query(az, target["scope"], start or dates[0], end or dates[-1], groupings, metric, aggs[0],
                              tenant=target.get("tenant"), **kw)
+                settled.add(target["id"])
+                return rows
             except AzureError as e:
-                # step down only when Azure objects to the cost columns; any other 400 is a real error
+                # step down only when Azure objects to the cost columns, and only until a query has worked: after
+                # that the columns are known good, and a 400 (a tag it can't group by) is that query's own problem
                 about_columns = COLUMN_ERROR.search(str(e))
-                if e.status != 400 or len(aggs) == 1 or not about_columns:
+                if e.status != 400 or len(aggs) == 1 or not about_columns or target["id"] in settled:
                     raise
                 aggs.pop(0)
 
@@ -485,12 +498,7 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None, tag=No
     findings, graph_error = None, None
     if graph and with_advisor:  # Resource Graph, like Advisor, reads subscriptions
         log("  Resource Graph ...")
-        try:
-            findings = graph_findings(az, with_advisor)
-        except Exception as e:  # needs Reader, like Advisor; the cost data alone is still worth a page
-            findings, graph_error = [], f"HTTP {e.status}" if isinstance(e, AzureError) else type(e).__name__
-            log(f"  skipped the Resource Graph checks ({e}). Reader on the subscription fixes access errors; "
-                "--no-graph hides this.")
+        findings, graph_error = graph_findings(az, with_advisor, log)
 
     found = {s["currency"] for s in subs if s["currency"]}
     # USD only if every row has a USD figure: a subscription may have answered in its billing currency alone
@@ -823,7 +831,7 @@ AI_INSTRUCTIONS = (
     "still to come and `total` is both. Hints of kind `idle` are resources Azure Resource Graph found billing while "
     "doing nothing (VMs stopped but still allocated, unattached disks, unused public IPs, snapshots older than 90 "
     "days, App Service plans with no apps, NAT gateways on no subnet), with what they cost in the current period. "
-    "Please:1) explain what drives the cost, 2) explain notable changes vs the previous period, "
+    "Please: 1) explain what drives the cost, 2) explain notable changes vs the previous period, "
     "3) suggest concrete savings, each with an estimated monthly saving and how to verify it. "
     "Levers to consider: reservations and savings plans for steady compute and databases; Azure Hybrid Benefit for "
     "Windows Server and SQL Server licenses already owned; dev/test pricing for non-production subscriptions; "
