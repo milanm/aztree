@@ -274,9 +274,10 @@ def choose_tag(az, targets, wanted, log=print):
         return wanted
     counts, spelling = Counter(), {}
     for t in targets:
-        if not t["scope"].lower().startswith("/subscriptions/"):
+        sub = re.match(r"/subscriptions/([^/]+)", t["scope"], re.I)
+        if not sub:
             continue  # tag names are listed per subscription; other scopes need --tag
-        url = f"{t['scope']}/tagNames?api-version={TAG_NAMES_API}"
+        url = f"/subscriptions/{sub.group(1)}/tagNames?api-version={TAG_NAMES_API}"
         try:
             while url:
                 page = az.call("GET", url, tenant=t.get("tenant"))
@@ -344,7 +345,11 @@ def graph_findings(az, targets, log=print):
     subscription without Advisor access: returns what the others found and the first failure's status, or None."""
     tenants = {}
     for t in targets:
-        tenants.setdefault(t.get("tenant"), []).append(t["id"])
+        # a subscription or resource-group scope: Resource Graph wants the subscription's id, not the path
+        sub = re.match(r"/subscriptions/([^/]+)", t["scope"], re.I)
+        subs = tenants.setdefault(t.get("tenant"), [])
+        if sub and sub.group(1) not in subs:
+            subs.append(sub.group(1))
     found, error = [], None
     for tenant, subs in tenants.items():
         options = {"resultFormat": "objectArray", "$top": 1000}
@@ -505,9 +510,17 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None, tag=No
     found = {s["currency"] for s in subs if s["currency"]}
     # USD only if every row has a USD figure: a subscription may have answered in its billing currency alone
     usd = len(found) > 1 and all(cost_usd is not None for entries in raw.values() for *_, cost_usd in entries)
-    if len(found) > 1 and not usd:
+    mixed = sorted(found) if len(found) > 1 and not usd else None  # the page and export say so; nothing converts them
+    if mixed:
         log("  warning: these subscriptions bill in different currencies and Azure won't convert them; totals mix currencies")
     currency = "USD" if usd or not found else min(found)
+    # units of the bill's currency per US dollar, from rows that carry both: the $ thresholds in the rules use it
+    paired = [(cost, cost_usd) for *_, cost, cost_usd in raw["service"] if cost_usd]
+    usd_rate = None
+    if currency == "USD":
+        usd_rate = 1.0
+    elif not mixed and sum(u for _, u in paired):
+        usd_rate = round(sum(c for c, _ in paired) / sum(u for _, u in paired), 4)
     forecast, forecast_note = None, None
     billed_in = {c for f in forecasts for c in f["currencies"] if c}
     if no_forecast:
@@ -531,6 +544,7 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None, tag=No
         "currency": currency,
         "subscriptions": subs, "resource_fallback": fallback,
         "advisor": recs, "advisor_error": advisor_error,
+        "mixed_currencies": mixed, "usd_rate": usd_rate,
         "forecast": forecast, "forecast_note": forecast_note,
         "graph": findings, "graph_error": graph_error, "demo": False,
     }
@@ -550,10 +564,24 @@ def fold(entries, n, usd):
     return pack(rows)
 
 
+TINY = "(under a cent each)"
+
+
 def pack(rows):
-    out = [{"k": list(k), "d": [round(v, 4) for v in d]} for k, d in rows.items()]
-    # drop only noise: a charge in one period and its refund in the other sum to zero but still count in both
-    return [r for r in out if sum(abs(v) for v in r["d"]) >= 0.005]
+    """Rows too small to keep alone (under half a cent over both periods) are summed per group into one TINY row,
+    so a thousand tiny charges still add up. A charge in one period and its refund in the other count in both."""
+    kept, tiny = {}, {}
+    for k, d in rows.items():
+        if sum(abs(v) for v in d) >= 0.005:
+            kept[k] = d
+        else:
+            acc = tiny.setdefault(k[0], [0.0] * len(d))
+            for i, v in enumerate(d):
+                acc[i] += v
+    for group, d in tiny.items():
+        if sum(abs(v) for v in d) >= 0.005:
+            kept[(group, TINY)] = d
+    return [{"k": list(k), "d": [round(v, 4) for v in d]} for k, d in kept.items()]
 
 
 # ---------------------------------------------------------------- demo data
@@ -822,7 +850,10 @@ def advisor_rec(p, target):
 AI_INSTRUCTIONS = (
     "This is an Azure cost breakdown exported by aztree. Amounts are in `currency`, for the cost type in `metric` "
     "(ActualCost books reservation and savings plan purchases on the day they were bought; AmortizedCost spreads them "
-    "over the term). `current` is the most recent period and `previous` is the equally long period before it. "
+    "over the term). When `currency` is \"mixed\", the subscriptions bill in the currencies listed in `currencies` and "
+    "Azure didn't convert them, so totals add different currencies: compare amounts within one subscription only. "
+    "`usd_rate` is units of `currency` per US dollar, as this bill priced them (null when unknown). "
+    "`current` is the most recent period and `previous` is the equally long period before it. "
     "Line items are Azure meters grouped by service; `totals.credits_and_refunds` is the part of `current` that comes "
     "from negative line items (credits, refunds). `resource_fallback` names subscriptions with so many resources that "
     "aztree read one total per resource and period for them: their resource groups' amounts are right, but daily "
@@ -949,7 +980,7 @@ def link_tip(rec, line_items, n):
     return {**rec, "covers": covers, "covers_monthly": round(sum(c["current"] for c in covers) / n * 30.4, 2)}
 
 
-def steady(data, line_keys, n):
+def steady(data, line_keys, n, rate=1.0):
     """Reservable spend that barely moves (no zero day, day-to-day spread within 10%) and runs at least $100 a
     month, one hint per service. Only asked for when Advisor, which knows what's already reserved, isn't there.
     `amount` is the period's dollars, like every other to-do, so they sort together; `monthly` is for the text."""
@@ -967,7 +998,7 @@ def steady(data, line_keys, n):
             s["meters"].append(meter)
     return [{"kind": "steady", "service": svc, "meters": s["meters"], "current": round(s["current"], 2),
              "amount": round(s["current"], 2), "monthly": round(s["current"] / n * 30.4, 2)}
-            for svc, s in by_service.items() if s["current"] / n * 30.4 >= 100]
+            for svc, s in by_service.items() if s["current"] / n * 30.4 >= 100 * rate]
 
 
 # Resource Graph checks (see IDLE_QUERY): what one is called, what several are called, and what to do
@@ -985,7 +1016,7 @@ IDLE = {
 IDLE_FLOOR = 1.0  # dollars over the period: a check that costs less isn't worth a line
 
 
-def idle(data):
+def idle(data, rate=1.0):
     """Resource Graph's findings with what each cost this period (from the resource view): one hint per check,
     biggest resource first. What cost nothing is left out: a free empty plan or a $0 IP isn't money."""
     split, cost, group = data["split"], {}, {}
@@ -1002,7 +1033,7 @@ def idle(data):
     hints = []
     for check, found in checks.items():
         total = round(sum(x["current"] for x in found), 2)
-        if total < IDLE_FLOOR:
+        if total < IDLE_FLOOR * rate:
             continue
         one, many, why = IDLE[check]
         found.sort(key=lambda x: -x["current"])
@@ -1017,6 +1048,7 @@ def summarize(data):
     """Turn the raw daily data into a compact JSON an AI agent can reason about."""
     days, split = data["days"], data["split"]
     n = len(days) - split
+    rate = data.get("usd_rate") or 1.0  # the bill's currency per US dollar: the rules' floors and prices are in dollars
 
     def money(v):
         return round(v, 2)
@@ -1075,11 +1107,11 @@ def summarize(data):
     line_items.sort(key=lambda x: -x["current"])
 
     growing = sorted((x for x in line_items
-                      if x["change"] >= max(1, grand * 0.005) and (x["change_pct"] is None or x["change_pct"] > 20)),
+                      if x["change"] >= max(rate, grand * 0.005) and (x["change_pct"] is None or x["change_pct"] > 20)),
                      key=lambda x: -x["change"])
     growers = growing[:10]
     drops = [x for x in line_items  # a refund (negative now) is a credit, not a saving: it goes in credits_and_refunds
-             if x["current"] > -0.01 and x["change"] <= -max(1, grand * 0.005) and (x["change_pct"] or 0) < -20]
+             if x["current"] > -0.01 and x["change"] <= -max(rate, grand * 0.005) and (x["change_pct"] or 0) < -20]
     drops = sorted(drops, key=lambda x: x["change"])[:10]
     # worth a look: news (what changed) takes turns with to-dos (what to fix), each sorted by its own dollars
     def hint(kind, x, amount, **extra):
@@ -1088,14 +1120,14 @@ def summarize(data):
 
     flags, todos = [], []
     for x in line_items:  # biggest first
-        why = pit(x["service"], x["meter"], x["current"] / n * 30.4)
+        why = pit(x["service"], x["meter"], x["current"] / n * 30.4 / rate)  # the rules are in US dollars
         if why and x["current"] >= grand * 0.002:
             flags.append({"service": x["service"], "meter": x["meter"], "current": x["current"], "reason": why})
             todos.append(hint("pit", x, x["current"], reason=why))
     items = {(x["service"], x["meter"]): x for x in line_items}
     spiked = {}
     for r in data["views"]["service"]["rows"]:
-        s = spike(r["d"], split, floor=max(10, grand * 0.0025))
+        s = spike(r["d"], split, floor=max(10 * rate, grand * 0.0025))
         if s and tuple(r["k"]) in items and items[tuple(r["k"])]["current"] > 0:  # a charge refunded in full is no news
             spiked[tuple(r["k"])] = hint("spike", items[tuple(r["k"])], s["excess"], date=days[s["day"]],
                                          day_cost=money(r["d"][s["day"]]), usual=money(s["usual"]))
@@ -1105,8 +1137,8 @@ def summarize(data):
     # steady spend is Advisor's job when it's there: it prices the saving and knows what's already reserved
     advisor_has_commitments = bool(advisor) and not data.get("advisor_error") and any(commitment_kinds(r) for r in advisor)
     if not advisor_has_commitments and data.get("metric") != "AmortizedCost":  # amortized, reserved usage looks flat too
-        todos += steady(data, {(x["service"], x["meter"]) for x in line_items}, n)
-    todos = sorted(todos + always_on(data, max(10, grand * 0.002)) + idle(data), key=lambda h: -h["amount"])
+        todos += steady(data, {(x["service"], x["meter"]) for x in line_items}, n, rate)
+    todos = sorted(todos + always_on(data, max(10 * rate, grand * 0.002)) + idle(data, rate), key=lambda h: -h["amount"])
     flagged = {(f["service"], f["meter"]) for f in flags}
     news = sorted([*spiked.values(), *(hint("grower", x, x["change"]) for x in growing
                                        if (x["service"], x["meter"]) not in flagged | set(spiked))],
@@ -1129,7 +1161,9 @@ def summarize(data):
         "instructions_for_ai": AI_INSTRUCTIONS,
         "generated": data.get("generated"),
         "metric": data.get("metric", "ActualCost"),
-        "currency": data.get("currency", "USD"),
+        "currency": "mixed" if data.get("mixed_currencies") else data.get("currency", "USD"),
+        "currencies": data.get("mixed_currencies") or [data.get("currency", "USD")],
+        "usd_rate": data.get("usd_rate"),
         "subscriptions": data.get("subscriptions", []),
         "demo_data": bool(data.get("demo")),
         "period": {

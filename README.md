@@ -32,7 +32,7 @@ The page opens in your browser. It shows the last 30 days, compared with the 30 
 - **Advisor:** Azure Advisor's cost recommendations (reservations, savings plans, right-sizing), one per resource and SKU. Reservation and savings-plan tips list the meters they would cover and what those run at a month. Click a tip to jump to its biggest meter, or to the resource it's about.
 - **Export for AI:** a JSON summary to hand to any AI agent (see below).
 
-Click to select and click again (or press Enter) to zoom in. `Tab` moves to the next box by size, `⌫` goes back up and the browser's Back button undoes zooms and jumps. `/` filters: what doesn't match fades, Enter keeps only the matches, and `Esc` clears the filter, then the selection. Add `#resource`, `#subscription`, `#region` or `#tag` to the page's URL to open that view.
+Click to select and click again (or press Enter) to zoom in. Once you've clicked the map, `Tab` moves to the next box by size. Click a "+N more" box twice to see the small items it holds. `⌫` goes back up and the browser's Back button undoes zooms and jumps. `/` filters: what doesn't match fades, Enter keeps only the matches, and `Esc` clears the filter, then the selection. Add `#resource`, `#subscription`, `#region` or `#tag` to the page's URL to open that view.
 
 ## Requirements
 
@@ -79,7 +79,7 @@ This writes `~/.aztree/aztree-export.json`, a compact summary that includes inst
 
 - `ActualCost` books a reservation or savings plan purchase as one lump on the day you bought it. `--metric AmortizedCost` spreads it over the term.
 - Credits and refunds count in the totals, but negative amounts can't be drawn as boxes. The header says how much of the total they are.
-- Subscriptions that bill in different currencies are drawn in USD.
+- Subscriptions that bill in different currencies are drawn in USD. When Azure can't convert them, the header says the totals mix currencies.
 - If a subscription has so many resources that a daily breakdown takes more than ten pages of results, the resource view still lists every resource but with one total per period and no daily chart.
 - Marketplace charges keep their publisher's meter names and get no special handling.
 - The forecast is Azure's own, for the calendar month, so it doesn't follow `--days`. It's left out when a subscription has none, or when it comes in a different currency from the page.

@@ -1011,7 +1011,7 @@ TEMPLATE = (REPO / "aztree" / "viewer.html").read_text(encoding="utf-8")
 FAKE_DOM = r"""
 const vm = require("vm"), fs = require("fs");
 const [code, view, click] = JSON.parse(fs.readFileSync(0, "utf8"));
-const made = [], byId = {}, docOn = {}, winOn = {}, calls = [], animations = [];
+const made = [], byId = {}, docOn = {}, winOn = {}, calls = [], animations = [], pressed = [];
 class El {
   constructor(tag) {
     Object.assign(this, { tag, children: [], dataset: {}, className: "", innerHTML: "", value: "", checked: false,
@@ -1064,8 +1064,16 @@ for (const a of Array.isArray(click) ? click : click ? [click] : []) {
   } else if (a.map === "click") {
     const b = a.name === null ? null : box(a.name);
     fire(byId["#map"].on.click, { target: { closest: () => b } });
-  } else if (a.press) {
-    fire(docOn.keydown, { key: a.press, shiftKey: !!a.shift, target: a.from ? byId["#" + a.from] : body, preventDefault() {} });
+  } else if (a.press) {  // {"press": "Tab", "from": "map"}; {"press": "Enter", "row": "[data-hint]:0"} presses on a panel row
+    let target = a.from ? byId["#" + a.from] : body;
+    if (a.row) {
+      const [sel, value] = a.row.split(":");
+      const hit = { closest: s => (s === sel ? { dataset: { [sel.slice(6, -1)]: value } } : null) };
+      target = { matches: s => s.includes("role=button"), click: () => fire(byId["#side"].on.click, { target: hit }) };
+    }
+    const ev = { key: a.press, shiftKey: !!a.shift, target, prevented: false, preventDefault() { ev.prevented = true; } };
+    fire(docOn.keydown, ev);
+    pressed.push(ev.prevented);
   } else if (a.type !== undefined) {
     byId["#filter"].value = a.type;
     fire(byId["#filter"].on.input, { target: byId["#filter"] });
@@ -1085,7 +1093,7 @@ console.log(JSON.stringify({
   views: byId["#views"]?.innerHTML ?? "", viewkeys: byId["#viewkeys"]?.innerHTML ?? "",  // only what the page asked for exists
   tip: byId["#tip"]?.innerHTML ?? "",
   drawn: cells().map(e => ({ cls: e.className, name: e._n?.name })),
-  history: calls, animations: animations.length,
+  history: calls, animations: animations.length, pressed,
   leafBoxes: made.filter(e => e.className.split(" ").includes("leaf"))
     .map(e => ({ cls: e.className, name: e._n.name, w: parseFloat(e.style.width), h: parseFloat(e.style.height) })),
 }));
@@ -2273,13 +2281,14 @@ class NavKeysTest(unittest.TestCase):
         self.assertNotIn('addEventListener("dblclick"', TEMPLATE)
 
     def test_tab_walks_by_size_and_shift_tab_back(self):
-        page = self.run_page(make_data(self.DATA), "service", click=[{"press": "Tab"}])
+        tab = {"press": "Tab", "from": "map"}  # the map walks its boxes when it has focus
+        page = self.run_page(make_data(self.DATA), "service", click=[tab])
         self.assertEqual(self.sel(page), "SQL Database")  # the largest box
-        page = self.run_page(make_data(self.DATA), "service", click=[{"press": "Tab"}] * 2)
+        page = self.run_page(make_data(self.DATA), "service", click=[tab] * 2)
         self.assertEqual(self.sel(page), "Storage")
-        page = self.run_page(make_data(self.DATA), "service", click=[{"press": "Tab"}] * 2 + [{"press": "Tab", "shift": True}])
+        page = self.run_page(make_data(self.DATA), "service", click=[tab] * 2 + [{**tab, "shift": True}])
         self.assertEqual(self.sel(page), "SQL Database")
-        page = self.run_page(make_data(self.DATA), "service", click=[{"map": "click", "name": "Hot LRS Data Stored"}, {"press": "Tab"}])
+        page = self.run_page(make_data(self.DATA), "service", click=[{"map": "click", "name": "Hot LRS Data Stored"}, tab])
         self.assertEqual(self.sel(page), "LRS Snapshots")  # among its siblings
 
     def test_enter_with_nothing_selected_picks_the_largest(self):
@@ -2303,7 +2312,7 @@ class HistoryTest(unittest.TestCase):
     def test_zooms_and_jumps_push_and_selecting_replaces(self):
         page = self.run_page(make_data(self.DATA), "service", click=[{"map": "click", "name": "Storage"}] * 2)
         self.assertEqual([c[0] for c in page["history"]], ["replace", "replace", "push"])  # load, select, open
-        self.assertEqual(page["history"][-1][1], {"view": "service", "zoom": "Storage", "sel": ["Storage", None]})
+        self.assertEqual(page["history"][-1][1], {"view": "service", "zoom": "Storage", "more": 0, "sel": ["Storage", None]})
         self.assertEqual(page["history"][-1][2], "#service")
 
     def test_back_restores_view_zoom_and_selection(self):
@@ -2373,16 +2382,12 @@ class Batch5ReviewTest(unittest.TestCase):
 
     def test_a_wrapper_clips_the_map_while_it_animates(self):
         # the transform is on #map, so #map's own overflow moves with it; going up would paint over the panel
-        self.assertIn('<div id="mapbox"><div id="map"></div></div>', TEMPLATE)
+        self.assertIn('<div id="mapbox"><div id="map" tabindex="0"></div></div>', TEMPLATE)
         self.assertRegex(TEMPLATE, r"#mapbox \{[^}]*overflow: hidden")
 
     def test_tab_after_opening_walks_the_opened_group(self):
-        page = self.run_page(make_data(self.DATA), "service", click=[{"map": "click", "name": "Storage"}] * 2 + [{"press": "Tab"}])
+        page = self.run_page(make_data(self.DATA), "service", click=[{"map": "click", "name": "Storage"}] * 2 + [{"press": "Tab", "from": "map"}])
         self.assertIn('<div class="sel-name">Hot LRS Data Stored</div>', page["side"])
-
-    def test_tab_works_when_the_panel_has_focus(self):
-        page = self.run_page(make_data(self.DATA), "service", click={"press": "Tab", "from": "side"})
-        self.assertIn('<div class="sel-name">SQL Database</div>', page["side"])
 
     def test_nothing_shows_under_the_sticky_advisor_header(self):
         self.assertRegex(TEMPLATE, r"\naside \{[^}]*padding: 14px 16px 0;")
@@ -2511,6 +2516,93 @@ class CleanupTest(unittest.TestCase):
         self.assertIn("<svg", page["side"])
         page = self.run_page(data, "resource", click={"map": "click", "name": "rg-app"})
         self.assertIn("period totals", page["side"])
+
+
+class V051ReviewTest(unittest.TestCase):
+    """An outside review of 0.5.1: each finding reproduced before it was fixed."""
+    render = ViewerTest.render
+    run_page = ViewerTest.run_page
+    MIXED = {("ServiceName", "Meter"): {"/subscriptions/aaaa-1": [(20260925, "Storage", "LRS", 100.0, "EUR", None)],
+                                        "/subscriptions/bbbb-2": [(20260925, "Storage", "LRS", 200.0, "USD", None)]}}
+    MIXED_REJECT = {"/subscriptions/aaaa-1": {"CostUSD"}, "/subscriptions/bbbb-2": {"Cost"}}
+
+    # 1. mixed currencies
+    def test_unconverted_currencies_are_flagged_not_summed_silently(self):
+        data, _ = fetch(self.MIXED, targets=(PROD, DEV), reject_for=self.MIXED_REJECT)
+        self.assertEqual(data["mixed_currencies"], ["EUR", "USD"])
+        s = aztree.summarize(data)
+        self.assertEqual((s["currency"], s["currencies"]), ("mixed", ["EUR", "USD"]))
+        self.assertIn("mixed", aztree.AI_INSTRUCTIONS)
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_the_page_says_the_totals_mix_currencies(self):
+        page = self.run_page(make_data([("Storage", "LRS", [5] * 6)], currency="EUR", mixed_currencies=["EUR", "USD"]), "service")
+        self.assertIn("mix EUR and USD", page["sub"])
+        self.assertNotIn("€", page["sub"])
+
+    # 2. dollar rules on other currencies
+    def test_the_bills_exchange_rate_is_read(self):
+        tables = {("ServiceName", "Meter"): {"/subscriptions/aaaa-1": [(20260925, "Storage", "LRS", 15000.0, "JPY", 100.0)]}}
+        data, _ = fetch(tables)
+        self.assertEqual((data["currency"], data["usd_rate"]), ("JPY", 150.0))
+
+    def test_dollar_rules_use_the_bills_exchange_rate(self):
+        # ¥4,256 a month of Front Door Standard base fees is about $28: under one profile's $35, so no "122 profiles"
+        yen = make_data([("Azure Front Door Service", "Standard Base Fees", [140] * 6)], currency="JPY", usd_rate=150.0)
+        self.assertEqual(aztree.summarize(yen)["flags"], [])
+        usd = make_data([("Azure Front Door Service", "Standard Base Fees", [140] * 6)])
+        self.assertIn("about 122 Front Door Standard profiles", aztree.summarize(usd)["flags"][0]["reason"])
+
+    # 3. tiny charges
+    def test_a_thousand_tiny_charges_still_add_up(self):
+        rows = {("rg", f"/subscriptions/a/resourcegroups/rg/providers/x/y/r{i}"): [0.001, 0, 0, 0.003, 0, 0] for i in range(1000)}
+        packed = aztree.pack(rows)
+        self.assertEqual([r["k"] for r in packed], [["rg", "(under a cent each)"]])
+        self.assertAlmostEqual(sum(sum(r["d"]) for r in packed), 4.0, places=2)
+
+    # 6. subscription and resource-group scopes
+    def test_a_subscription_scope_asks_resource_graph_for_its_id(self):
+        for scope in ("/subscriptions/aaaa-1", "/subscriptions/aaaa-1/resourceGroups/rg-app"):
+            with self.subTest(scope=scope):
+                router = Router({}, findings=[[]])
+                aztree.fetch(client(router), [aztree.scope_target(scope)], 3, "ActualCost", advisor=False,
+                             log=lambda *a: None, today=TODAY)
+                (call,) = [c for c in router.other if c[0] == "graph"]
+                self.assertEqual(call[1]["subscriptions"], ["aaaa-1"])
+
+    # 4. keyboard
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_tab_from_the_page_is_left_to_the_browser(self):
+        page = self.run_page(make_data(FilterDimTest.DATA), "service", click={"press": "Tab"})
+        self.assertEqual(page["pressed"], [False])
+        self.assertIn('<div class="sel-name">Everything</div>', page["side"])
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_tab_on_the_map_walks_the_boxes_and_lets_go_after_the_last(self):
+        page = self.run_page(make_data(FilterDimTest.DATA), "service", click=[{"press": "Tab", "from": "map"}] * 3)
+        self.assertEqual(page["pressed"], [True, True, False])  # SQL Database, Storage, then on to the next control
+        self.assertIn('<div class="sel-name">Storage</div>', page["side"])
+        self.assertIn('id="map" tabindex="0"', TEMPLATE)
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_panel_rows_are_keyboard_controls(self):
+        data = make_data([("Log Analytics", "Analytics Logs Data Ingestion", [30] * 6)])
+        page = self.run_page(data, "service")
+        self.assertIn('data-hint="0" role="button" tabindex="0"', page["side"])
+        page = self.run_page(data, "resource", click={"press": "Enter", "row": "[data-hint]:0"})
+        self.assertIn('<div class="sel-name">Analytics Logs Data Ingestion</div>', page["side"])
+
+    # 5. "+N more" inside a zoomed group
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_the_more_box_opens_inside_a_zoomed_group(self):
+        meters = [("Log Analytics", "Analytics Logs Data Ingestion", [1000] * 6)] + [("Log Analytics", f"m {i}", [0.1] * 6) for i in range(30)]
+        clicks = [{"map": "click", "name": "Log Analytics"}] * 2 + [{"map": "click", "name": "+30 more"}] * 2
+        page = self.run_page(make_data(meters), "service", click=clicks)
+        self.assertIn("m 0", {d["name"] for d in page["drawn"]})
+        self.assertIn("30 smaller meters", page["crumbs"])
+        page = self.run_page(make_data(meters), "service", click=clicks + [{"press": "Backspace"}])
+        self.assertIn("+30 more", {d["name"] for d in page["drawn"]})
+        self.assertIn('<span class="cur">Log Analytics</span>', page["crumbs"])
 
 
 class ExplainTest(unittest.TestCase):

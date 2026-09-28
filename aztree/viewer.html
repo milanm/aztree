@@ -54,7 +54,8 @@ label.chk input { accent-color: var(--accent); margin: 0; }
 
 /* the zoom animation transforms #map, so the clipping has to sit on a box that doesn't move */
 #mapbox { margin: 2px 8px 8px 12px; min-height: 0; overflow: hidden; }
-#map { position: relative; height: 100%; transform-origin: 0 0; }
+#map { position: relative; height: 100%; transform-origin: 0 0; outline: none; }
+#map:focus-visible { outline: 1px solid color-mix(in srgb, var(--accent) 50%, transparent); outline-offset: -1px; }
 .cell { position: absolute; overflow: hidden; border-radius: 2px; cursor: pointer; }
 /* disktree's look: no outlines, gaps separate the boxes, a box is a step lighter than its group */
 .leaf { background-color: color-mix(in oklab, var(--c) 32%, var(--bg)); padding: 3px 5px; }
@@ -90,7 +91,7 @@ aside { grid-column: 2; grid-row: 2 / 4; border-left: 1px solid var(--line); bac
 .stats div span { display: block; color: var(--dim); font-size: 10px; letter-spacing: .6px; text-transform: uppercase; margin-bottom: 2px; }
 .stats div { font-size: 13px; }
 .stats b { font-weight: 400; }
-.upc { color: var(--up); } .downc { color: var(--down); }
+.upc, .warn { color: var(--up); } .downc { color: var(--down); }
 .spark { margin-top: 14px; }
 .spark svg { display: block; width: 100%; height: 46px; }
 .spark .axis { display: flex; justify-content: space-between; color: var(--dim); font-size: 10px; margin-top: 3px; }
@@ -149,7 +150,7 @@ kbd { font: 10.5px ui-monospace, Menlo, monospace; color: var(--muted); border: 
     <input id="filter" aria-label="Filter" placeholder="filter  /" autocomplete="off" spellcheck="false">
   </header>
   <div class="sub" id="sub"></div>
-  <div id="mapbox"><div id="map"></div></div>
+  <div id="mapbox"><div id="map" tabindex="0"></div></div>
   <aside id="side"></aside>
   <footer>
     <span><kbd>click</kbd>select</span><span><kbd>click</kbd>again or <kbd>enter</kbd>open</span><span><kbd>tab</kbd>next</span><span><kbd>⌫</kbd>up</span>
@@ -169,13 +170,14 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const hashView = (() => { try { return decodeURIComponent(location.hash.slice(1)); } catch { return ""; } })();
 const state = { view: VIEW_KEYS.includes(hashView) && DATA.views[hashView] ? hashView : "service",
-  change: false, filter: "", collapsed: false, zoom: null, sel: null, expanded: { hints: false, recs: false } };
+  change: false, filter: "", collapsed: false, more: 0, zoom: null, sel: null, expanded: { hints: false, recs: false } };
 
 // ---------- formatting
 const SYMBOLS = { USD: "$", EUR: "€", GBP: "£", JPY: "¥", CNY: "¥", INR: "₹", KRW: "₩", BRL: "R$", AUD: "A$", CAD: "C$",
   NZD: "NZ$", HKD: "HK$", TWD: "NT$", MXN: "MX$", ILS: "₪", TRY: "₺", PLN: "zł ", ZAR: "R " };
 const sym = code => esc(SYMBOLS[code || "USD"] ?? `${code} `);
-const CUR = sym(DATA.currency);
+const CUR = DATA.mixed_currencies ? "" : sym(DATA.currency); // unconverted currencies: no one symbol would be true
+const MIXED = DATA.mixed_currencies ? `<span class="warn" title="Azure couldn't convert these subscriptions to one currency, so every amount adds different currencies">totals mix ${esc(DATA.mixed_currencies.join(" and "))}: Azure didn't convert them</span>` : "";
 function money(v, s = CUR) {
   const a = Math.abs(v), p = (v < 0 ? "-" : "") + s;
   if (a >= 1e6) return p + (a / 1e6).toFixed(2) + "M";
@@ -343,6 +345,7 @@ function place(el, r, gap) {
   el.style.left = r.x + gap + "px"; el.style.top = r.y + gap + "px";
   el.style.width = Math.max(0, r.w - gap * 2) + "px"; el.style.height = Math.max(0, r.h - gap * 2) + "px";
 }
+let moreCount = 0; // boxes at the opened "+N more" level, for the crumbs
 let drawn = []; // the nodes the last render() drew, in drawing order (largest first within each parent)
 function cell(cls, n, r, gap) {
   const el = document.createElement("div");
@@ -360,7 +363,7 @@ function fold(nodes, w, h) {
   const i = nodes.findIndex(n => n.cur * px < MIN_BOX);
   if (i < 0 || nodes.length - i < 2) return nodes;
   const rest = nodes.slice(i), dim = rest[0].dim;
-  const more = { kind: "leaf", more: rest.length, key: "\u0000more", name: `+${rest.length} more`, dim, parent: rest[0].parent,
+  const more = { kind: "leaf", more: rest.length, rest, key: "\u0000more", name: `+${rest.length} more`, dim, parent: rest[0].parent,
     hit: rest.some(n => n.hit), // lit when the filter matches something inside it
     full: `${rest.length} smaller ${DIM[dim].many}`, cur: 0, prev: 0, daily: new Float64Array(N) };
   for (const n of rest) {
@@ -410,7 +413,12 @@ function render() {
     map.innerHTML = `<div class="empty">${narrowed() ? "Nothing matches “" + esc(state.filter) + "”" : "No spend in this period"}</div>`;
   } else {
     if (base === root) for (const r of squarify(base.children, 0, 0, W, H)) drawGroup(frag, r);
-    else for (const r of squarify(fold(base.children, W, H), 0, 0, W, H)) drawLeaf(frag, r);
+    else {
+      let nodes = base.children; // "+N more" opened: its boxes, one level of the long tail at a time
+      for (let i = 0; i < state.more; i++) { const m = fold(nodes, W, H).find(n => n.more); if (!m) break; nodes = m.rest; }
+      moreCount = state.more ? nodes.length : 0;
+      for (const r of squarify(fold(nodes, W, H), 0, 0, W, H)) drawLeaf(frag, r);
+    }
     map.replaceChildren(frag);
   }
   if (state.sel?._el?.isConnected) state.sel._el.classList.add("sel");
@@ -434,6 +442,7 @@ function renderChrome(base) {
   $("#change").checked = state.change;
   $("#crumbs").innerHTML = `<span>/</span>` + (base === root
     ? `<span class="cur">all ${esc(DIM[A].many)}</span>`
+    : state.more ? `<a data-up>all ${esc(DIM[A].many)}</a><span>/</span><a data-group>${esc(base.name)}</a><span>/</span><span class="cur">${moreCount} smaller ${esc(DIM[B].many)}</span>`
     : `<a data-up>all ${esc(DIM[A].many)}</a><span>/</span><span class="cur">${esc(base.name)}</span>`);
   const leaves = root.children.reduce((s, g) => s + g.children.length, 0);
   const todoKey = marks().size ? '<span><i class="todo"></i>to-do</span>' : ""; // first, so a narrow legend clips "Other" instead
@@ -451,7 +460,7 @@ function renderChrome(base) {
   const untagged = state.view === "tag" && !narrowed()
     ? `<span title="spend on resources without the ${esc(TAG)} tag">untagged ${money(UNTAGGED)} (${pct(grand > 0 ? UNTAGGED / grand : 0)} of bill)</span>` : "";
   $("#sub").innerHTML = `<span><b>${money(root.cur)}</b> · ${period()}</span><span>${root.children.length} ${esc(DIM[A].many)} · ${leaves} ${esc(DIM[B].many)}</span>
-    ${fallback}${untagged}${creditNote(root, "span")}${readout}<div class="legend">${legend}</div>`;
+    ${MIXED}${fallback}${untagged}${creditNote(root, "span")}${readout}<div class="legend">${legend}</div>`;
 }
 
 // a subscription with too many resources gets one total per resource and period, so no daily chart in that view
@@ -529,12 +538,12 @@ const TERM = { P1Y: "1-yr term", P3Y: "3-yr term", P5Y: "5-yr term" };
 const SHOWN_RECS = 5, SHOWN_HINTS = 6;
 const HINT_TAG = { grower: "grew", spike: "spike", pit: "fix", devtest: "dev/test", steady: "reserve", idle: "idle" };
 // one row of a side-panel list: title and amount on a line, then a small kind tag and the (already escaped) reason
-const row = (attr, color, title, full, value, tag, whyHtml, whyTitle) => `<div class="hint" ${attr} style="--c:${color}">
+const row = (attr, color, title, full, value, tag, whyHtml, whyTitle) => `<div class="hint" ${attr} role="button" tabindex="0" style="--c:${color}">
   <div class="ht"><span class="hn" title="${esc(full)}">${esc(title)}</span><span class="hv">${value}</span></div>
   <div class="hs"${whyTitle ? ` title="${esc(whyTitle)}"` : ""}>${tag ? `<span class="tag">${tag}</span>` : ""}${whyHtml}</div></div>`;
 // a long list opens in place: "show all N" / "show fewer"
 const showAll = (list, n, cap) => (n > cap
-  ? `<div class="showall" data-more="${list}">${state.expanded[list] ? "show fewer" : `show all ${n}`}</div>` : "");
+  ? `<div class="showall" data-more="${list}" role="button" tabindex="0">${state.expanded[list] ? "show fewer" : `show all ${n}`}</div>` : "");
 // the export's copy of Advisor's tips knows which meters a reservation or savings plan would cover
 const TIPS = DATA.export?.advisor ?? DATA.advisor;
 // "covers SQL Database · vCore ($1,216/mo) + 1 more", or who/what the tip is about
@@ -553,7 +562,7 @@ function advisorPanel() {
   }
   const top = state.expanded.recs ? recs : recs.slice(0, SHOWN_RECS);
   // the header is the aside's own child, so it can stick to the bottom while the lists above it scroll
-  return `<div class="advh h" data-adv>Advisor <b>${recs.length} cost tip${recs.length > 1 ? "s" : ""}</b></div><section>` +
+  return `<div class="advh h" data-adv role="button" tabindex="0">Advisor <b>${recs.length} cost tip${recs.length > 1 ? "s" : ""}</b></div><section>` +
     top.map((r, i) => row(`data-rec="${i}"`, "var(--advisor)", r.problem, r.solution || r.problem,
       r.annual_savings ? money(r.annual_savings, sym(r.currency || DATA.currency)) + "/yr" : "–", null, esc(tipLine(r)),
       [r.resource_name, r.sku, r.region, Object.hasOwn(TERM, r.term) && TERM[r.term]].filter(Boolean).join(" · "))).join("") +
@@ -628,12 +637,12 @@ const isTodo = n => n.kind === "leaf" && !n.more && (marks().has(n.parent.key + 
 
 // ---------- interaction
 function showView(v) {
-  state.view = v; state.zoom = null; state.sel = null;
+  state.view = v; state.zoom = null; state.sel = null; state.more = 0;
   root = buildTree(v, state.filter, narrowed());
 }
 // Back and Forward: a view change, a zoom and a jump are steps; selecting only updates the step you're on
 function remember(push) {
-  const s = { view: state.view, zoom: state.zoom, sel: findNode(selKey(state.sel)) === state.sel ? selKey(state.sel) : null };
+  const s = { view: state.view, zoom: state.zoom, more: state.more, sel: findNode(selKey(state.sel)) === state.sel ? selKey(state.sel) : null };
   history[push ? "pushState" : "replaceState"](s, "", "#" + state.view);
 }
 function setView(v) {
@@ -661,24 +670,27 @@ function animateZoom(r, opening) {
     { duration: Math.min(310, 130 + 45 * Math.log2(1 / (sx * sy))), easing: "cubic-bezier(.33, 1, .68, 1)" });
 }
 function open(n) {
+  if (n?.more && state.zoom !== null) { state.more++; state.sel = null; render(); remember(true); return; } // one level into the long tail
   const g = n?.kind === "leaf" ? n.parent : n;
   // already inside, or a group that isn't on this map (a drop whose service went to zero): nothing to open
   if (g?.kind !== "group" || state.zoom === g.key || !root.children.includes(g)) return;
   const from = rectOf(g);
-  state.zoom = g.key; render(); remember(true); animateZoom(from, true);
+  state.zoom = g.key; state.more = 0; render(); remember(true); animateZoom(from, true);
 }
 // Tab walks the drawn boxes by size among the selection's siblings (disktree: scanning for space is this walk)
 function step(dir) {
   let peers = drawn.filter(n => n.parent === state.sel?.parent);
   // the selection isn't drawn (the group just opened, or a drop that went to zero): walk what the map shows
   if (!peers.length) peers = drawn.filter(n => n.parent === (zoomed() || root));
-  if (!peers.length) return;
-  const i = peers.indexOf(state.sel);
-  select(peers[i < 0 ? 0 : Math.max(0, Math.min(peers.length - 1, i + dir))]);
+  if (!peers.length) return false;
+  const i = peers.indexOf(state.sel), j = i < 0 ? 0 : i + dir;
+  if (j < 0 || j >= peers.length) return false; // past the end: the caller lets Tab move on
+  select(peers[j]); return true;
 }
 function up(animate = true) {
+  if (state.more > 0) { state.more--; state.sel = null; render(); remember(true); return; }
   if (state.zoom !== null) {
-    const g = zoomed(); state.zoom = null; state.sel = g || null; render(); remember(true);
+    const g = zoomed(); state.zoom = null; state.more = 0; state.sel = g || null; render(); remember(true);
     if (animate) animateZoom(rectOf(g), false); // g's box in the top-level map, just drawn
   }
   else if (state.sel) select(null);
@@ -700,7 +712,7 @@ addEventListener("popstate", e => {
   clearFilter();
   showView(s.view); // not setView: Back to the same view with another zoom must still land
   const z = s.zoom ?? null; // "" is a real zoom key (no region, untagged)
-  if (z !== null && root.children.some(g => g.key === z)) state.zoom = z;
+  if (z !== null && root.children.some(g => g.key === z)) { state.zoom = z; state.more = s.more ?? 0; }
   state.sel = findNode(s.sel);
   render();
 });
@@ -715,7 +727,10 @@ $("#viewkeys").innerHTML = VIEW_KEYS.map((v, i) => (DATA.views[v] ? `<kbd>${i + 
 map.addEventListener("click", e => { const c = e.target.closest(".cell"), n = c ? c._n : null; n && n === state.sel ? open(n) : select(n); });
 $("#views").addEventListener("click", e => e.target.dataset.v && setView(e.target.dataset.v));
 $("#change").addEventListener("change", e => { state.change = e.target.checked; render(); });
-$("#crumbs").addEventListener("click", e => { if (e.target.closest("[data-up]")) up(false); }); // a crumb jump doesn't animate
+$("#crumbs").addEventListener("click", e => { // a crumb jump doesn't animate
+  if (e.target.closest("[data-group]")) { state.more = 0; state.sel = null; render(); remember(true); }
+  else if (e.target.closest("[data-up]")) { state.more = 0; up(false); }
+});
 // typing dims what doesn't match; the map keeps its shape, and the zoom and selection stay
 $("#filter").addEventListener("input", e => { state.filter = e.target.value.trim(); state.collapsed = false; rebuild(); render(); });
 $("#side").addEventListener("click", e => {
@@ -753,10 +768,11 @@ document.addEventListener("keydown", e => {
     if (e.key === "Enter" && state.filter) { state.collapsed = true; rebuild(); $("#filter").blur(); render(); }
     return;
   }
+  if ((e.key === "Enter" || e.key === " ") && e.target.matches?.("[role=button]")) { e.preventDefault(); e.target.click(); return; }
+  if (e.key === "Enter" && e.target.matches?.("button, a, select, input, textarea")) return; // the control's own Enter
   if (e.metaKey || e.ctrlKey || e.altKey) return;
-  if (e.key === "Tab") { // not from a control, so the header stays reachable; a clicked panel (Chrome focuses scrollers) still walks
-    if (e.target.matches?.("input, button, select, textarea, a")) return;
-    e.preventDefault(); step(e.shiftKey ? -1 : 1);
+  if (e.key === "Tab") { // the map walks its boxes; anywhere else, and past the last box, Tab is the browser's
+    if (e.target === map && step(e.shiftKey ? -1 : 1)) e.preventDefault();
   }
   else if (e.key === "/") { e.preventDefault(); $("#filter").focus(); }
   else if (e.key === "Enter") state.sel ? open(state.sel) : step(1);
