@@ -286,7 +286,8 @@ def choose_tag(az, targets, wanted, log=print):
                         counts[name.lower()] += (item.get("count") or {}).get("value") or 0
                 url = page.get("nextLink")
         except AzureError as e:
-            log(f"  {t['name']}: couldn't list its tags (HTTP {e.status}); pass --tag KEY to choose one")
+            fix = "run `az login` again" if e.status == 401 else "pass --tag KEY to choose one"  # 401: the token, not the tags
+            log(f"  {t['name']}: couldn't list its tags (HTTP {e.status}); {fix}")
     if not counts:
         return None
     return spelling[min(counts, key=lambda k: (-counts[k], k))]  # most resources, then by name
@@ -660,7 +661,9 @@ def demo_forecast(views, dates, today):
     month = today.strftime("%Y-%m")
     last = (today.replace(day=1) + dt.timedelta(32)).replace(day=1) - dt.timedelta(1)
     actual = round(sum(v for d, v in zip(dates, daily) if d.startswith(month)), 2)
-    rest = round(sum(daily[-7:]) / 7 * (last - dt.date.fromisoformat(dates[-1])).days, 2)
+    # the days still to come this month: after the demo's last day, or all of them when that day is last month's
+    since = max(dt.date.fromisoformat(dates[-1]), today.replace(day=1) - dt.timedelta(1))
+    rest = round(sum(daily[-7:]) / 7 * (last - since).days, 2)
     return {"month": month, "actual": actual, "forecast": rest, "total": round(actual + rest, 2)}
 
 
@@ -826,8 +829,8 @@ AI_INSTRUCTIONS = (
     "reported; recommendations that cover the same usage (a reservation and a savings plan, a 1-year and a 3-year term) "
     "are alternatives, not additive. A tip's `covers` lists the meters its reservation or savings plan would cover, "
     "matched across the whole bill, so in a multi-subscription export it can include other subscriptions' usage. "
-    "`by_tag` splits the bill by the values of the tag named in `tag`; \"(untagged)\" is spend on resources without "
-    "it. `forecast` is Azure's own forecast for the current calendar month: `actual` is billed so far, `forecast` is "
+    "`by_tag` splits the bill by the values of the tag named in `tag`; the row marked `untagged: true` (shown as "
+    "\"(untagged)\") is spend on resources without it. `forecast` is Azure's own forecast for the current calendar month: `actual` is billed so far, `forecast` is "
     "still to come and `total` is both. Hints of kind `idle` are resources Azure Resource Graph found billing while "
     "doing nothing (VMs stopped but still allocated, unattached disks, unused public IPs, snapshots older than 90 "
     "days, App Service plans with no apps, NAT gateways on no subnet), with what they cost in the current period. "
@@ -1114,7 +1117,8 @@ def summarize(data):
     tag_view = data["views"].get("tag")
     by_tag = breakdown("tag", "value", "service") if tag_view else None
     for row in by_tag or []:
-        row["value"] = row["value"] or "(untagged)"
+        if row["value"] == "":  # flagged, so a real tag value "(untagged)" stays a different row
+            row.update(value="(untagged)", untagged=True)
 
     return {
         "tool": "aztree",

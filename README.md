@@ -37,7 +37,7 @@ Click to select and click again (or press Enter) to zoom in. `Tab` moves to the 
 ## Requirements
 
 - Python 3.9+ and the [Azure CLI](https://aka.ms/azcli), logged in with `az login`. Without the CLI, put a token for `https://management.azure.com/` in `AZURE_ACCESS_TOKEN` and name the subscriptions with `--subscription` or `--all`. A bare token only sees its own tenant; through the CLI, aztree sees every tenant you're logged in to and gets a token for each.
-- The **Cost Management Reader** role (or Reader) on each subscription. Advisor tips and the Resource Graph checks need Reader; without it you still get the page.
+- The **Cost Management Reader** role (or Reader) on each subscription. Advisor tips, the Resource Graph checks and the automatic tag choice need Reader; without it you still get the page, and `--tag KEY` still gives you the tag view.
 - Tested on a CSP subscription. On CSP, Azure shows costs at retail prices without your partner's discounts, and reserved usage as $0 even with `--metric AmortizedCost`, so the totals won't match your partner's invoice. Pay-as-you-go and Visual Studio subscriptions use the same API.
 - EA and MCA billing scopes should work through `--scope`, but nobody has tried yet. At such a scope the subscription view shows the whole scope as one box, and Advisor is skipped.
 

@@ -655,7 +655,8 @@ function animateZoom(r, opening) {
 }
 function open(n) {
   const g = n?.kind === "leaf" ? n.parent : n;
-  if (g?.kind !== "group" || state.zoom === g.key) return; // already inside: a second click is not a second zoom
+  // already inside, or a group that isn't on this map (a drop whose service went to zero): nothing to open
+  if (g?.kind !== "group" || state.zoom === g.key || !root.children.includes(g)) return;
   const from = rectOf(g);
   state.zoom = g.key; render(); remember(true); animateZoom(from, true);
 }
@@ -724,7 +725,7 @@ $("#side").addEventListener("click", e => {
     reveal("service", same(leaf));
     if (!state.sel) { // went to zero: no box to select, so open its service (if it still has one) and show its numbers
       if (root.children.some(g => g.key === leaf.parent.key)) state.zoom = leaf.parent.key;
-      state.sel = leaf; render();
+      state.sel = leaf; render(); remember(false); // the step Back returns to is the service, not the top
     }
   } else if (r) {
     const rec = TIPS[+r.dataset.rec], sub = (rec.resource.match(/^\/subscriptions\/([^/]+)$/) || [])[1], top = rec.covers?.[0];

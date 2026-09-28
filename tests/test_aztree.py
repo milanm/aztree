@@ -2397,6 +2397,48 @@ class Batch5ReviewTest(unittest.TestCase):
         self.assertRegex(TEMPLATE, r"\.legend \{[^}]*flex-wrap: wrap")
 
 
+class DeferredMinorsTest(unittest.TestCase):
+    """The small findings deferred from the batch 4 and 5 reviews, each reproduced before it was fixed."""
+    render = ViewerTest.render
+    run_page = ViewerTest.run_page
+
+    def test_the_demo_forecast_on_the_first_counts_the_months_days(self):
+        data = aztree.demo(30, today=aztree.dt.date(2026, 10, 1))  # the demo's last day is Sep 29
+        daily = [sum(r["d"][i] for r in data["views"]["service"]["rows"]) for i in range(len(data["days"]))]
+        f = data["forecast"]
+        self.assertEqual((f["month"], f["actual"]), ("2026-10", 0))
+        self.assertEqual(f["forecast"], round(sum(daily[-7:]) / 7 * 31, 2))  # Oct 1-31, not Sep 30 too
+
+    def test_an_expired_login_is_told_to_log_in_not_to_pass_a_tag(self):
+        lines = []
+        aztree.choose_tag(client(Router({}, tag_names={"aaaa-1": 401})), [aztree.subscription_target(PROD)], None,
+                          log=lines.append)
+        self.assertTrue(any("az login" in line for line in lines), lines)
+        self.assertFalse(any("--tag" in line for line in lines), lines)
+
+    def test_untagged_spend_is_marked_apart_from_a_value_named_untagged(self):
+        data = make_data([("Storage", "LRS", [5] * 6)])
+        data["views"]["tag"] = {"dims": ["TagValue", "ServiceName"], "names": {}, "tag": "env",
+                                "rows": [{"k": ["(untagged)", "Storage"], "d": [4] * 6}, {"k": ["", "Storage"], "d": [1] * 6}]}
+        rows = {(r["value"], bool(r.get("untagged"))): r["current"] for r in aztree.summarize(data)["by_tag"]}
+        self.assertEqual(rows, {("(untagged)", False): 12.0, ("(untagged)", True): 3.0})
+
+    DROPPED = [("Storage", "LRS", [5] * 6), ("Storage", "Old disk", [10, 10, 10, 0, 0, 0]),
+               ("Old Service", "Old meter", [30, 30, 30, 0, 0, 0])]
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_enter_on_a_drop_whose_service_is_gone_does_not_zoom(self):
+        page = self.run_page(make_data(self.DROPPED), "service", click=["[data-drop]:0", {"press": "Enter"}])
+        self.assertIn("all services", page["crumbs"])
+        self.assertFalse([c for c in page["history"] if c[1]["zoom"] == "Old Service"])
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_back_after_a_gone_drop_jump_remembers_the_zoom(self):
+        page = self.run_page(make_data(self.DROPPED), "service", click="[data-drop]:1")  # Old disk: Storage is still there
+        self.assertIn('<span class="cur">Storage</span>', page["crumbs"])
+        self.assertEqual(page["history"][-1][1]["zoom"], "Storage")
+
+
 class ExplainTest(unittest.TestCase):
     def test_bad_response_is_not_blamed_on_the_network(self):
         send = FakeSend(page(["UsageDate", "ServiceName", "Meter"], [[20260925, "Storage", "LRS"]]))
