@@ -1,6 +1,8 @@
 import io
 import json
+import shutil
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -14,6 +16,13 @@ SUBS = [
     {"id": "bbbb-2", "name": "acme-dev", "state": "Enabled"},
     {"id": "cccc-3", "name": "old-sandbox", "state": "Disabled"},
 ]
+
+
+def scratch_dir(test):
+    """A temp folder removed when the test ends."""
+    d = Path(tempfile.mkdtemp(prefix="aztree-test-"))
+    test.addCleanup(shutil.rmtree, d, True)
+    return d
 
 
 def quiet(fn, *args, **kwargs):
@@ -645,9 +654,7 @@ console.log(JSON.stringify({
 
 class ViewerTest(unittest.TestCase):
     def render(self, data):
-        import tempfile
-        d = tempfile.mkdtemp()
-        out = Path(d) / "aztree.html"
+        out = scratch_dir(self) / "aztree.html"
         aztree.render(data, out)
         return out
 
@@ -711,8 +718,7 @@ class ViewerTest(unittest.TestCase):
 
 class MainTest(unittest.TestCase):
     def setUp(self):
-        import tempfile
-        self.dir = Path(tempfile.mkdtemp())
+        self.dir = scratch_dir(self)
         self.saved = self.dir / "aztree-data.json"
         self.saved.write_text(json.dumps(BASIC), encoding="utf-8")
 
@@ -826,8 +832,7 @@ class DemoTest(unittest.TestCase):
         self.assertEqual(aztree.demo(30, today=TODAY), self.data)
 
     def test_main_demo_needs_no_azure(self):
-        import tempfile
-        page = Path(tempfile.mkdtemp()) / "demo.html"
+        page = scratch_dir(self) / "demo.html"
         real = aztree.get_token
         aztree.get_token = lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not call Azure"))
         try:
