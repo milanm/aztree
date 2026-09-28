@@ -91,7 +91,8 @@ aside { grid-column: 2; grid-row: 2 / 4; border-left: 1px solid var(--line); bac
 .hint:hover .hn { color: #fff; }
 .hn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hv { text-align: right; white-space: nowrap; }
-.hs { color: var(--dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hs { color: var(--dim); font-size: 11px; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2; line-clamp: 2; } /* two lines: the reason is the point of a hint */
 .hb { height: 3px; background: #1d2330; border-radius: 2px; align-self: center; width: 80px; overflow: hidden; }
 .hb i { display: block; height: 100%; background: var(--c, var(--accent)); opacity: .8; }
 .foot { margin-top: auto; border-top: 1px solid var(--line); padding-top: 14px; }
