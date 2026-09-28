@@ -128,9 +128,7 @@ kbd { font: 10.5px ui-monospace, Menlo, monospace; color: var(--muted); border: 
     <div class="logo"><i><b style="background:var(--compute)"></b><b style="background:var(--storage)"></b><b style="background:var(--database)"></b><b style="background:var(--network)"></b></i>aztree</div>
     <div class="crumbs" id="crumbs"></div>
     <div class="spacer"></div>
-    <div class="seg" id="views">
-      <button data-v="service">Service</button><button data-v="subscription">Subscription</button><button data-v="region">Region</button><button data-v="resource">Resource</button>
-    </div>
+    <div class="seg" id="views"></div>
     <label class="chk"><input type="checkbox" id="change"> Color by change</label>
     <button id="export" title="Download a JSON summary to give to an AI agent (e)">Export for AI</button>
     <input id="filter" aria-label="Filter" placeholder="filter  /" autocomplete="off" spellcheck="false">
@@ -140,7 +138,7 @@ kbd { font: 10.5px ui-monospace, Menlo, monospace; color: var(--muted); border: 
   <aside id="side"></aside>
   <footer>
     <span><kbd>click</kbd>select</span><span><kbd>dbl-click</kbd><kbd>enter</kbd>open</span><span><kbd>⌫</kbd>up</span>
-    <span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><kbd>4</kbd>view</span><span><kbd>c</kbd>color</span><span><kbd>/</kbd>filter</span><span><kbd>e</kbd>export</span><span><kbd>esc</kbd>clear</span>
+    <span id="viewkeys"></span><span><kbd>c</kbd>color</span><span><kbd>/</kbd>filter</span><span><kbd>e</kbd>export</span><span><kbd>esc</kbd>clear</span>
     <span class="spacer"></span><span id="meta"></span>
   </footer>
 </div>
@@ -150,7 +148,8 @@ kbd { font: 10.5px ui-monospace, Menlo, monospace; color: var(--muted); border: 
 const DATA = __AZTREE_DATA__;
 
 const N = DATA.days.length, SPLIT = DATA.split, DAYS = N - SPLIT;
-const VIEW_KEYS = ["service", "subscription", "region", "resource"];
+const VIEW_KEYS = ["service", "subscription", "region", "resource", "tag"];
+const TAG = DATA.views.tag?.tag ?? "tag"; // the tag view splits the bill by one tag's values; aztree.py picked the tag
 const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const hashView = (() => { try { return decodeURIComponent(location.hash.slice(1)); } catch { return ""; } })();
@@ -192,6 +191,8 @@ const DIM = {
   ResourceGroupName: { one: "resource group", many: "resource groups", label: (v, names) => names[v] || lastSeg(v) },
   // resources without an id (some marketplace and support charges) keep a plain label
   ResourceId: { one: "resource", many: "resources", label: v => (v.startsWith("/") ? lastSeg(v) : shortSvc(v)) },
+  // one box per value of the tag, and one for spend on resources without it
+  TagValue: { one: `${TAG} value`, many: `${TAG} values`, label: v => v || "(untagged)" },
 };
 const CATS = [
   ["compute", "Compute"], ["storage", "Storage"], ["database", "Database"], ["network", "Network"],
@@ -278,6 +279,9 @@ function buildTree(viewKey, filter) {
 let root = buildTree(state.view, "");
 const whole = buildTree("service", ""), grand = whole.cur; // shares are always of the whole bill, even when filtered
 const CREDITS = whole.credits; // meters with a negative total: the export's credits_and_refunds
+// spend on resources without the tag, for the tag view's header (the "(untagged)" box before any filter)
+const UNTAGGED = (DATA.views.tag?.rows || []).filter(r => r.k[0] === "")
+  .reduce((s, r) => s + r.d.slice(SPLIT).reduce((a, b) => a + b, 0), 0);
 
 // ---------- squarified treemap layout
 function squarify(nodes, x, y, w, h) {
@@ -389,16 +393,18 @@ function renderChrome(base) {
   document.querySelectorAll("#views button").forEach(b => b.classList.toggle("on", b.dataset.v === state.view));
   $("#change").checked = state.change;
   $("#crumbs").innerHTML = `<span>/</span>` + (base === root
-    ? `<span class="cur">all ${DIM[A].many}</span>`
-    : `<a data-up>all ${DIM[A].many}</a><span>/</span><span class="cur">${esc(base.name)}</span>`);
+    ? `<span class="cur">all ${esc(DIM[A].many)}</span>`
+    : `<a data-up>all ${esc(DIM[A].many)}</a><span>/</span><span class="cur">${esc(base.name)}</span>`);
   const leaves = root.children.reduce((s, g) => s + g.children.length, 0);
   const legend = state.change
     ? [["--down", "down"], ["--neutral", "flat"], ["--up", "up / new"]].map(([c, l]) => `<span><i style="background:var(${c})"></i>${l}</span>`).join("")
     : CATS.map(([k, l]) => `<span><i style="background:var(--${k})"></i>${l}</span>`).join("");
   const fallback = totalsOnly()
     ? `<span title="too many resources for a daily series: each resource has one total per period">period totals for ${esc(DATA.resource_fallback.join(", "))}</span>` : "";
-  $("#sub").innerHTML = `<span><b>${money(root.cur)}</b> · ${period()}</span><span>${root.children.length} ${DIM[A].many} · ${leaves} ${DIM[B].many}</span>
-    ${fallback}${creditNote(root, "span")}${state.filter ? `<span>filter “${esc(state.filter)}” · ${pct(root.cur / grand)} of bill</span>` : ""}<div class="legend">${legend}</div>`;
+  const untagged = state.view === "tag" && !state.filter
+    ? `<span title="spend on resources without the ${esc(TAG)} tag">untagged ${money(UNTAGGED)} (${pct(grand > 0 ? UNTAGGED / grand : 0)} of bill)</span>` : "";
+  $("#sub").innerHTML = `<span><b>${money(root.cur)}</b> · ${period()}</span><span>${root.children.length} ${esc(DIM[A].many)} · ${leaves} ${esc(DIM[B].many)}</span>
+    ${fallback}${untagged}${creditNote(root, "span")}${state.filter ? `<span>filter “${esc(state.filter)}” · ${pct(root.cur / grand)} of bill</span>` : ""}<div class="legend">${legend}</div>`;
 }
 
 // a subscription with too many resources gets one total per resource and period, so no daily chart in that view
@@ -425,6 +431,13 @@ function renderSide() {
     : n.kind === "group" ? n.full : `${DIM[A].many} → ${DIM[B].many}`;
   const kind = n.kind === "root" ? "whole bill" : n.more ? `${n.more} ${DIM[n.dim].many}` : DIM[n.dim].one;
   const title = n.kind === "root" ? (state.filter ? `“${state.filter}”` : "Everything") : n.name;
+  // Azure's own forecast for this calendar month, on the whole bill only: it knows nothing of views or filters
+  const F = n.kind === "root" && !state.filter ? DATA.forecast : null;
+  const mon = F && new Date(F.month + "-01T00:00:00").toLocaleDateString("en-US", { month: "short" });
+  const tail = F
+    ? `<div><span>${mon} so far</span>${money(F.actual)}</div><div><span>${mon} forecast</span>${money(F.total)}</div>`
+    : `<div><span>kind</span>${esc(kind)}</div>
+      <div><span>category</span>${n.kind === "root" ? "–" : (CATS.find(c => c[0] === category(n)) || [, "–"])[1]}</div>`;
 
   let html = `<section><div class="h">Selection</div>
     <div class="sel-name">${esc(title)}</div><div class="sel-path">${esc(path)}</div>
@@ -435,17 +448,19 @@ function renderSide() {
       <div><span>vs prev ${DAYS}d</span>${change}</div>
       <div><span>per day</span>${money(n.cur / DAYS)}</div>
       <div><span>monthly pace</span>${money((n.cur / DAYS) * 30.4)}</div>
-      <div><span>kind</span>${esc(kind)}</div>
-      <div><span>category</span>${n.kind === "root" ? "–" : (CATS.find(c => c[0] === category(n)) || [, "–"])[1]}</div>
+      ${tail}
     </div>${spark(n)}</section>`;
 
-  const hints = worthALook();
-  if (hints.length) {
+  const hints = worthALook(), gerr = DATA.graph_error;
+  // Resource Graph checks that couldn't run: say so where their findings would be
+  const graphNote = !gerr ? "" : `<div class="note">${/^HTTP 40[13]\b/.test(gerr)
+    ? "Resource Graph checks need Reader, so they didn't run." : `Resource Graph checks didn't run (${esc(gerr)}).`}</div>`;
+  if (hints.length || graphNote) {
     const shown = state.expanded.hints ? hints : hints.slice(0, SHOWN_HINTS);
     // a count, not a sum: a dev/test group's total can include meters that are hints of their own
-    html += `<section><div class="h">Worth a look <b>${hints.length}</b></div>` +
+    html += `<section><div class="h">Worth a look${hints.length ? ` <b>${hints.length}</b>` : ""}</div>` +
       shown.map((h, i) => row(`data-hint="${i}"`, h.c, h.title, h.n.full, money(h.value), HINT_TAG[h.h.kind] || "look", esc(h.why), h.why)).join("") +
-      showAll("hints", hints.length, SHOWN_HINTS) + `</section>`;
+      showAll("hints", hints.length, SHOWN_HINTS) + graphNote + `</section>`;
   }
   const drops = biggestDrops();
   if (drops.length) {
@@ -461,7 +476,7 @@ function renderSide() {
 // ---------- Azure Advisor: cost recommendations, read by aztree.py (none when run with --no-advisor)
 const TERM = { P1Y: "1-yr term", P3Y: "3-yr term", P5Y: "5-yr term" };
 const SHOWN_RECS = 5, SHOWN_HINTS = 6;
-const HINT_TAG = { grower: "grew", spike: "spike", pit: "fix", devtest: "dev/test", steady: "reserve" };
+const HINT_TAG = { grower: "grew", spike: "spike", pit: "fix", devtest: "dev/test", steady: "reserve", idle: "idle" };
 // one row of a side-panel list: title and amount on a line, then a small kind tag and the (already escaped) reason
 const row = (attr, color, title, full, value, tag, whyHtml, whyTitle) => `<div class="hint" ${attr} style="--c:${color}">
   <div class="ht"><span class="hn" title="${esc(full)}">${esc(title)}</span><span class="hv">${value}</span></div>
@@ -505,7 +520,8 @@ function biggestDrops() {
 }
 
 // ---------- worth a look: the hints aztree.py computed (the export's `hints`, in order), placed on the service view
-const HINT_COLOR = { grower: "var(--up)", spike: "var(--up)", pit: "var(--accent)", devtest: "var(--accent)", steady: "var(--advisor)" };
+const HINT_COLOR = { grower: "var(--up)", spike: "var(--up)", pit: "var(--accent)", devtest: "var(--accent)", steady: "var(--advisor)",
+  idle: "var(--accent)" };
 let _hints;
 function worthALook() {
   if (_hints) return _hints;
@@ -518,6 +534,10 @@ function worthALook() {
     if (h.kind === "devtest") {
       const n = groups.get(h.group);
       return n && { h, n, c, why, title: n.name, value: h.amount, view: "resource", find: m => m.kind === "group" && m.key === h.group };
+    }
+    if (h.kind === "idle") { // several resources: a click opens the biggest, which the reason names
+      const top = h.resources[0], n = groups.get(top.group)?.children.find(c => c.key === top.id);
+      return n && { h, n, c, why, title: h.label, value: h.amount, view: "resource", find: m => m.kind === "leaf" && m.key === top.id };
     }
     if (h.kind === "steady") {
       const n = t.children.find(g => g.key === h.service);
@@ -573,6 +593,12 @@ function reveal(view, find) {
   render();
 }
 
+// one button per view the data has; the tag view's is named after its tag
+const VIEW_NAMES = { service: "Service", subscription: "Subscription", region: "Region", resource: "Resource" };
+$("#views").innerHTML = VIEW_KEYS.filter(v => DATA.views[v])
+  .map(v => `<button data-v="${v}">${esc(VIEW_NAMES[v] || TAG)}</button>`).join("");
+$("#viewkeys").innerHTML = VIEW_KEYS.map((v, i) => (DATA.views[v] ? `<kbd>${i + 1}</kbd>` : "")).join("") + "view";
+
 map.addEventListener("click", e => { const c = e.target.closest(".cell"); select(c ? c._n : null); });
 map.addEventListener("dblclick", e => { const c = e.target.closest(".cell"); if (c) open(c._n); });
 $("#views").addEventListener("click", e => e.target.dataset.v && setView(e.target.dataset.v));
@@ -619,7 +645,7 @@ document.addEventListener("keydown", e => {
   else if (e.key === "Backspace") { e.preventDefault(); up(); }
   else if (e.key === "e" && DATA.export) exportJSON();
   else if (e.key === "c" || e.key === "t") { state.change = !state.change; render(); }
-  else if (["1", "2", "3", "4"].includes(e.key)) setView(VIEW_KEYS[+e.key - 1]);
+  else if (/^[1-5]$/.test(e.key)) setView(VIEW_KEYS[+e.key - 1]);
 });
 
 function exportJSON() {

@@ -980,19 +980,22 @@ class El {
   addEventListener(type, fn) { (this.on[type] = this.on[type] || []).push(fn); }
   closest() { return null; } focus() {} blur() {} click() {} dispatchEvent() {}
 }
-const byId = {}, made = [];
+const byId = {}, made = [], docOn = {};
 Object.assign(globalThis, {
   document: {
     querySelector: s => byId[s] || (byId[s] = new El(s)), querySelectorAll: () => [],
     createElement: t => { const e = new El(t); made.push(e); return e; },
-    createDocumentFragment: () => new El("#fragment"), addEventListener() {},
+    createDocumentFragment: () => new El("#fragment"),
+    addEventListener: (type, fn) => (docOn[type] = docOn[type] || []).push(fn),
   },
   location: { hash: "#" + view }, history: { replaceState() {} },
   ResizeObserver: class { observe() {} }, requestAnimationFrame: () => 0, cancelAnimationFrame() {},
   innerWidth: 1400, innerHeight: 900,
 });
 vm.runInThisContext(code);
-if (click && typeof click === "object") {  // {"map": "dblclick", "key": ""} double-clicks that group's box
+if (click && typeof click === "object" && click.press) {  // {"press": "5"} presses a key
+  for (const fn of docOn.keydown || []) fn({ key: click.press, target: {}, preventDefault() {} });
+} else if (click && typeof click === "object") {  // {"map": "dblclick", "key": ""} double-clicks that group's box
   const box = made.find(e => e.className === "cell group" && e._n.key === click.key);
   for (const fn of byId["#map"].on[click.map] || []) fn({ target: { closest: () => box } });
 } else if (click) {  // "[data-rec]:0" clicks the first Advisor tip in the side panel
@@ -1005,6 +1008,7 @@ console.log(JSON.stringify({
   boxes: made.map(e => e.innerHTML).join("\n"),
   side: byId["#side"].innerHTML, sub: byId["#sub"].innerHTML, meta: byId["#meta"].innerHTML,
   crumbs: byId["#crumbs"].innerHTML,
+  views: byId["#views"]?.innerHTML ?? "", viewkeys: byId["#viewkeys"]?.innerHTML ?? "",  // only what the page asked for exists
   leafBoxes: made.filter(e => e.className.split(" ").includes("leaf"))
     .map(e => ({ cls: e.className, name: e._n.name, w: parseFloat(e.style.width), h: parseFloat(e.style.height) })),
 }));
@@ -2012,6 +2016,79 @@ class ViewerEdgesTest(unittest.TestCase):
                "sku": "x", "term": "constructor", "annual_savings": 10.0, "currency": "USD", "subscription": "acme-prod"}
         page = self.run_page(make_data([("Storage", "LRS", [1] * 6)], advisor=[rec]), "service")
         self.assertNotIn("native code", page["side"])
+
+
+@unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+class Batch4PageTest(unittest.TestCase):
+    render = ViewerTest.render
+    run_page = ViewerTest.run_page
+    F = {"month": "2026-09", "actual": 150.0, "forecast": 85.0, "total": 235.0}
+
+    def tagged(self, tag="environment"):
+        data = make_data([("Storage", "LRS", [5] * 6), ("SQL Database", "vCore", [10] * 6)])
+        data["views"]["tag"] = {"dims": ["TagValue", "ServiceName"], "names": {}, "tag": tag,
+                                "rows": [{"k": ["prod", "SQL Database"], "d": [10] * 6}, {"k": ["", "Storage"], "d": [5] * 6}]}
+        return data
+
+    def test_the_tag_view_has_a_button_named_after_the_tag(self):
+        page = self.run_page(self.tagged(), "service")
+        self.assertIn('<button data-v="tag">environment</button>', page["views"])
+        self.assertIn("<kbd>5</kbd>", page["viewkeys"])
+        plain = self.run_page(make_data([("Storage", "LRS", [5] * 6)]), "service")
+        self.assertNotIn('data-v="tag"', plain["views"])
+        self.assertIn('<button data-v="resource">Resource</button>', plain["views"])
+        self.assertNotIn("<kbd>5</kbd>", plain["viewkeys"])
+
+    def test_key_5_and_the_hash_open_the_tag_view(self):
+        for page in (self.run_page(self.tagged(), "service", click={"press": "5"}), self.run_page(self.tagged(), "tag")):
+            self.assertIn("all environment values", page["crumbs"])
+            self.assertIn("(untagged)", page["boxes"])
+            self.assertIn("untagged $15.00 (33% of bill)", page["sub"])
+
+    def test_without_a_tag_view_key_5_does_nothing(self):
+        page = self.run_page(make_data([("Storage", "LRS", [5] * 6)]), "service", click={"press": "5"})
+        self.assertIn("all services", page["crumbs"])
+
+    def test_a_tag_name_cannot_inject_html(self):
+        page = self.run_page(self.tagged(tag='<img src=x onerror="alert(1)">'), "tag")
+        for part in ("views", "crumbs", "sub"):
+            self.assertNotIn("<img", page[part], part)
+        self.assertIn("&lt;img", page["crumbs"])
+
+    def test_the_whole_bill_shows_this_months_forecast(self):
+        page = self.run_page(make_data([("Storage", "LRS", [5] * 6)], forecast=self.F), "service")
+        self.assertIn("<span>Sep so far</span>$150", page["side"])
+        self.assertIn("<span>Sep forecast</span>$235", page["side"])
+        self.assertNotIn("whole bill", page["side"])
+
+    def test_a_selection_shows_its_own_kind_instead(self):
+        data = make_data([("Log Analytics", "Analytics Logs Data Ingestion", [2, 2, 2, 6, 6, 6])], forecast=self.F)
+        page = self.run_page(data, "service", click="[data-hint]:0")
+        self.assertNotIn("so far", page["side"])
+        self.assertIn("<span>kind</span>meter", page["side"])
+
+    def test_no_forecast_keeps_the_old_cells(self):
+        page = self.run_page(make_data([("Storage", "LRS", [5] * 6)]), "service")
+        self.assertIn("<span>kind</span>whole bill", page["side"])
+
+    def idle_data(self):
+        disk = RG + "/providers/microsoft.compute/disks/d1"
+        graph = [{"check": "unattached-disk", "id": disk, "name": "d1", "resourceGroup": "rg-app", "subscriptionId": "aaaa-1"}]
+        return make_data([("Storage", "P10 LRS Disk", [3] * 6)], resource_rows=[(RG, disk, [3] * 6)], graph=graph)
+
+    def test_an_idle_resource_is_a_row_that_opens_it(self):
+        page = self.run_page(self.idle_data(), "service")
+        self.assertIn('<span class="tag">idle</span>unattached disk: attached to no VM', page["side"])
+        self.assertIn('title="' + RG + '/providers/microsoft.compute/disks/d1">d1</span>', page["side"])
+        page = self.run_page(self.idle_data(), "service", click="[data-hint]:0")
+        self.assertIn("all resource groups", page["crumbs"])
+        self.assertIn('<div class="sel-name">d1</div>', page["side"])
+
+    def test_graph_errors_get_a_note(self):
+        page = self.run_page(make_data([("Storage", "LRS", [5] * 6)], graph=[], graph_error="HTTP 403"), "service")
+        self.assertIn("Resource Graph checks need Reader", page["side"])
+        page = self.run_page(make_data([("Storage", "LRS", [5] * 6)], graph=[], graph_error="HTTP 500"), "service")
+        self.assertIn("didn't run (HTTP 500)", page["side"])
 
 
 class ExplainTest(unittest.TestCase):
