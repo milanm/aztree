@@ -1065,7 +1065,7 @@ for (const a of Array.isArray(click) ? click : click ? [click] : []) {
     const b = a.name === null ? null : box(a.name);
     fire(byId["#map"].on.click, { target: { closest: () => b } });
   } else if (a.press) {
-    fire(docOn.keydown, { key: a.press, shiftKey: !!a.shift, target: body, preventDefault() {} });
+    fire(docOn.keydown, { key: a.press, shiftKey: !!a.shift, target: a.from ? byId["#" + a.from] : body, preventDefault() {} });
   } else if (a.type !== undefined) {
     byId["#filter"].value = a.type;
     fire(byId["#filter"].on.input, { target: byId["#filter"] });
@@ -2362,6 +2362,39 @@ class PanelTest(unittest.TestCase):
     def test_the_tooltip_gives_share_of_parent_for_a_box(self):
         page = self.run_page(make_data(FilterDimTest.DATA), "service", click={"hover": "LRS Snapshots"})
         self.assertIn("29% of Storage", page["tip"])
+
+
+@unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+class Batch5ReviewTest(unittest.TestCase):
+    """Findings from the batch 5 review, each reproduced before it was fixed."""
+    render = ViewerTest.render
+    run_page = ViewerTest.run_page
+    DATA = FilterDimTest.DATA
+
+    def test_a_wrapper_clips_the_map_while_it_animates(self):
+        # the transform is on #map, so #map's own overflow moves with it; going up would paint over the panel
+        self.assertIn('<div id="mapbox"><div id="map"></div></div>', TEMPLATE)
+        self.assertRegex(TEMPLATE, r"#mapbox \{[^}]*overflow: hidden")
+
+    def test_tab_after_opening_walks_the_opened_group(self):
+        page = self.run_page(make_data(self.DATA), "service", click=[{"map": "click", "name": "Storage"}] * 2 + [{"press": "Tab"}])
+        self.assertIn('<div class="sel-name">Hot LRS Data Stored</div>', page["side"])
+
+    def test_tab_works_when_the_panel_has_focus(self):
+        page = self.run_page(make_data(self.DATA), "service", click={"press": "Tab", "from": "side"})
+        self.assertIn('<div class="sel-name">SQL Database</div>', page["side"])
+
+    def test_nothing_shows_under_the_sticky_advisor_header(self):
+        self.assertRegex(TEMPLATE, r"\naside \{[^}]*padding: 14px 16px 0;")
+        self.assertRegex(TEMPLATE, r"#side > section:last-child \{[^}]*padding-bottom: 14px")
+
+    def test_a_more_box_holding_a_match_is_not_dimmed(self):
+        meters = [("Log Analytics", "Analytics Logs Data Ingestion", [1000] * 6)] + [("Log Analytics", f"m {i}", [0.1] * 6) for i in range(30)]
+        more = [d for d in self.run_page(make_data(meters), "service", click={"type": "m 3"})["drawn"] if d["name"] == "+30 more"]
+        self.assertNotIn("dim", more[0]["cls"].split())
+
+    def test_the_legend_drops_whole_entries_instead_of_cutting_a_word(self):
+        self.assertRegex(TEMPLATE, r"\.legend \{[^}]*flex-wrap: wrap")
 
 
 class ExplainTest(unittest.TestCase):

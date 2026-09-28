@@ -49,10 +49,12 @@ label.chk input { accent-color: var(--accent); margin: 0; }
 .legend { display: flex; gap: 12px; margin-left: auto; }
 .legend span { display: flex; align-items: center; gap: 5px; }
 .legend i { width: 9px; height: 9px; border-radius: 2px; }
-.legend { overflow: hidden; }
+.legend { overflow: hidden; flex-wrap: wrap; max-height: 16px; } /* entries that don't fit drop whole, never half a word */
 .legend i.todo { background: #262b35 repeating-linear-gradient(135deg, transparent 0 2px, rgb(255 255 255 / .35) 2px 3px); }
 
-#map { position: relative; margin: 2px 8px 8px 12px; min-height: 0; overflow: hidden; transform-origin: 0 0; }
+/* the zoom animation transforms #map, so the clipping has to sit on a box that doesn't move */
+#mapbox { margin: 2px 8px 8px 12px; min-height: 0; overflow: hidden; }
+#map { position: relative; height: 100%; transform-origin: 0 0; }
 .cell { position: absolute; overflow: hidden; border-radius: 2px; cursor: pointer; }
 /* disktree's look: no outlines, gaps separate the boxes, a box is a step lighter than its group */
 .leaf { background-color: color-mix(in oklab, var(--c) 32%, var(--bg)); padding: 3px 5px; }
@@ -74,7 +76,8 @@ label.chk input { accent-color: var(--accent); margin: 0; }
 .empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 14px; }
 
 aside { grid-column: 2; grid-row: 2 / 4; border-left: 1px solid var(--line); background: var(--panel);
-  padding: 14px 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 18px; }
+  padding: 14px 16px 0; overflow-y: auto; display: flex; flex-direction: column; gap: 18px; }
+#side > section:last-child { padding-bottom: 14px; } /* the bottom padding lives here, so the sticky Advisor header sits flush */
 .h { color: var(--dim); font-size: 10.5px; letter-spacing: .8px; text-transform: uppercase; display: flex; justify-content: space-between; }
 .h b { color: var(--accent); font-weight: 500; letter-spacing: 0; }
 .sel-name { font-size: 16px; margin-top: 8px; word-break: break-word; }
@@ -146,7 +149,7 @@ kbd { font: 10.5px ui-monospace, Menlo, monospace; color: var(--muted); border: 
     <input id="filter" aria-label="Filter" placeholder="filter  /" autocomplete="off" spellcheck="false">
   </header>
   <div class="sub" id="sub"></div>
-  <div id="map"></div>
+  <div id="mapbox"><div id="map"></div></div>
   <aside id="side"></aside>
   <footer>
     <span><kbd>click</kbd>select</span><span><kbd>click</kbd>again or <kbd>enter</kbd>open</span><span><kbd>tab</kbd>next</span><span><kbd>⌫</kbd>up</span>
@@ -355,6 +358,7 @@ function fold(nodes, w, h) {
   if (i < 0 || nodes.length - i < 2) return nodes;
   const rest = nodes.slice(i), dim = rest[0].dim;
   const more = { kind: "leaf", more: rest.length, key: "\u0000more", name: `+${rest.length} more`, dim, parent: rest[0].parent,
+    hit: rest.some(n => n.hit), // lit when the filter matches something inside it
     full: `${rest.length} smaller ${DIM[dim].many}`, cur: 0, prev: 0, daily: new Float64Array(N) };
   for (const n of rest) {
     more.cur += n.cur; more.prev += n.prev;
@@ -657,7 +661,9 @@ function open(n) {
 }
 // Tab walks the drawn boxes by size among the selection's siblings (disktree: scanning for space is this walk)
 function step(dir) {
-  const parent = state.sel?.parent ?? (zoomed() || root), peers = drawn.filter(n => n.parent === parent);
+  let peers = drawn.filter(n => n.parent === state.sel?.parent);
+  // the selection isn't drawn (the group just opened, or a drop that went to zero): walk what the map shows
+  if (!peers.length) peers = drawn.filter(n => n.parent === (zoomed() || root));
   if (!peers.length) return;
   const i = peers.indexOf(state.sel);
   select(peers[i < 0 ? 0 : Math.max(0, Math.min(peers.length - 1, i + dir))]);
@@ -740,8 +746,8 @@ document.addEventListener("keydown", e => {
     return;
   }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
-  if (e.key === "Tab") { // only when no control has focus, so the header stays reachable by keyboard
-    if (e.target !== document.body) return;
+  if (e.key === "Tab") { // not from a control, so the header stays reachable; a clicked panel (Chrome focuses scrollers) still walks
+    if (e.target.matches?.("input, button, select, textarea, a")) return;
     e.preventDefault(); step(e.shiftKey ? -1 : 1);
   }
   else if (e.key === "/") { e.preventDefault(); $("#filter").focus(); }
