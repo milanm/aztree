@@ -155,7 +155,7 @@ The tests need no Azure access. The viewer tests run the page's script in Node a
 
 ## Credits
 
-aztree is a port of [awstree](https://github.com/petricbranko/awstree) by Branko Petric (MIT). It keeps awstree's viewer and its JSON contract and replaces the AWS parts. awstree, in turn, is inspired by [disktree](https://x.com/tobi/status/2103251521223921739) by [Tobi Lütke](https://x.com/tobi).
+aztree is a port of [awstree](https://github.com/petricbranko/awstree) by Branko Petric (MIT). It keeps awstree's viewer and its JSON contract and replaces the AWS parts. awstree, in turn, is inspired by [disktree](https://github.com/tobi/disktree) by [Tobi Lütke](https://x.com/tobi).
 
 aztree is not affiliated with or endorsed by Microsoft.
 
