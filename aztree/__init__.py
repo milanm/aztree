@@ -486,6 +486,27 @@ def last_full_day(today=None):
     return (today or dt.date.today()) - dt.timedelta(2)
 
 
+def pick_currency(found, raw, log=print):
+    """The page's currency, from the billing currencies `found` and each view's (key, day, cost, cost in USD) entries
+    in `raw`: one currency stays as it is, several become US dollars when every entry has a USD figure, and otherwise
+    the totals mix them. Returns (currency, usd, mixed, usd_rate): whether amounts are the USD figures, the currencies
+    mixed (or None), and units of the currency per US dollar (or None when unknown)."""
+    # USD only if every row has a USD figure: a subscription may have answered in its billing currency alone
+    usd = len(found) > 1 and all(cost_usd is not None for entries in raw.values() for *_, cost_usd in entries)
+    mixed = sorted(found) if len(found) > 1 and not usd else None  # the page and export say so; nothing converts them
+    if mixed:
+        log("  warning: these subscriptions bill in different currencies and Azure won't convert them; totals mix currencies")
+    currency = "USD" if usd or not found else min(found)
+    # units of the bill's currency per US dollar, from rows that carry both: the $ thresholds in the rules use it
+    paired = [(cost, cost_usd) for *_, cost, cost_usd in raw["service"] if cost_usd]
+    usd_rate = None
+    if currency == "USD":
+        usd_rate = 1.0
+    elif not mixed and sum(u for _, u in paired):
+        usd_rate = round(sum(c for c, _ in paired) / sum(u for _, u in paired), 4)
+    return currency, usd, mixed, usd_rate
+
+
 def fetch(az, targets, days, metric, advisor=True, log=print, today=None, tag=None, graph=True):
     end = last_full_day(today)
     start = end - dt.timedelta(2 * days - 1)  # current window + previous window, for the "vs prev" deltas
@@ -594,19 +615,7 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None, tag=No
         findings, graph_error = graph_findings(az, with_advisor, log)
 
     found = {s["currency"] for s in subs if s["currency"]}
-    # USD only if every row has a USD figure: a subscription may have answered in its billing currency alone
-    usd = len(found) > 1 and all(cost_usd is not None for entries in raw.values() for *_, cost_usd in entries)
-    mixed = sorted(found) if len(found) > 1 and not usd else None  # the page and export say so; nothing converts them
-    if mixed:
-        log("  warning: these subscriptions bill in different currencies and Azure won't convert them; totals mix currencies")
-    currency = "USD" if usd or not found else min(found)
-    # units of the bill's currency per US dollar, from rows that carry both: the $ thresholds in the rules use it
-    paired = [(cost, cost_usd) for *_, cost, cost_usd in raw["service"] if cost_usd]
-    usd_rate = None
-    if currency == "USD":
-        usd_rate = 1.0
-    elif not mixed and sum(u for _, u in paired):
-        usd_rate = round(sum(c for c, _ in paired) / sum(u for _, u in paired), 4)
+    currency, usd, mixed, usd_rate = pick_currency(found, raw, log)
     forecast, forecast_note = None, None
     billed_in = {c for f in forecasts for c in f["currencies"] if c}
     if no_forecast:

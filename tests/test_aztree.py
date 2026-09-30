@@ -398,6 +398,26 @@ class FetchTest(unittest.TestCase):
         self.assertEqual(rows_of(data, "region"), {("East US", "Storage"): [0, 0, 0, 3.0, 0, 0]})
 
 
+class PickCurrencyTest(unittest.TestCase):
+    KEY = ("Storage", "LRS")
+
+    def pick(self, found, entries):
+        return aztree.pick_currency(found, {"service": entries}, log=lambda *a: None)
+
+    def test_one_currency_stays_and_prices_the_dollar(self):
+        self.assertEqual(self.pick({"EUR"}, [(self.KEY, 0, 9.0, 10.0)]), ("EUR", False, None, 0.9))
+
+    def test_several_currencies_with_dollars_everywhere_become_dollars(self):
+        self.assertEqual(self.pick({"EUR", "GBP"}, [(self.KEY, 0, 9.0, 10.0), (self.KEY, 1, 8.0, 10.0)]),
+                         ("USD", True, None, 1.0))
+
+    def test_several_currencies_without_dollars_are_mixed(self):
+        self.assertEqual(self.pick({"EUR", "GBP"}, [(self.KEY, 0, 9.0, None)]), ("EUR", False, ["EUR", "GBP"], None))
+
+    def test_no_currency_is_dollars(self):
+        self.assertEqual(self.pick(set(), []), ("USD", False, None, 1.0))
+
+
 class RegionNameTest(unittest.TestCase):
     def test_cost_managements_short_names(self):
         for short, name in [("us east", "East US"), ("US West 2", "West US 2"), ("eu west", "West Europe"),
