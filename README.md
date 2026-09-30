@@ -36,7 +36,7 @@ The page opens in your browser. It shows the last 30 days, compared with the 30 
 ## What you get
 
 - **Treemap** of spend by service → meter. Press `2` to group by subscription, `3` by region, `4` by resource group → resource and `5` by tag value → service.
-- **Tag view:** spend by the values of one tag, with untagged spend as its own box and its share of the bill in the header. aztree picks the tag on the most resources; `--tag KEY` picks another.
+- **Tag view:** spend by the values of one tag, with untagged spend as its own box and its share of the bill in the header. aztree picks the tag on the most resources; `--tag KEY` picks another. When that share is a tenth of the bill or more, "how to fix" there points to tag inheritance and a tag policy.
 - **Color by change** (`c`): red where spend grew, green where it shrank.
 - **Selection panel:** cost, share of the bill, change vs the previous period, monthly pace and a daily chart. For the whole bill, the last two cells show this month so far and Azure's forecast for the month. The name of a selected subscription, resource group or resource opens it in the Azure portal.
 - **Worth a look:** one list where news and to-dos take turns. The first six show, and "show all" opens the rest. On the map, the boxes a to-do is about have diagonal stripes.
@@ -100,6 +100,26 @@ The summary has totals and every meter with its change vs the previous period. I
 
 Give it to an AI agent and ask *"where can I save money?"*
 
+## Read a FOCUS export
+
+Organizations on an Enterprise Agreement (EA) or a Microsoft Customer Agreement (MCA) can have Cost Management export their costs to a storage account. aztree can draw its page from those files instead of calling the Cost Management API. Then it needs no Azure login and never waits for throttling. Pay-as-you-go subscriptions can't export these files.
+
+1. In the Azure portal, open **Cost Management → Exports** at the scope you want. Create an export of **Cost and usage details (FOCUS)**: **CSV** with **Gzip**, a daily export of month-to-date costs, with **Overwrite data** on.
+2. Use **Export selected dates** to add last month, so there's a period to compare with.
+3. Download the export's folder, manifests included:
+
+   ```bash
+   az storage blob download-batch --account-name ACCOUNT --source CONTAINER --pattern "DIR/EXPORT/*" --destination ./focus --auth-mode login
+   ```
+
+4. Run `aztree --focus ./focus`.
+
+aztree reads the newest run for each day, so repeated runs don't count twice. Download one export at a time: two exports of the same days would overlap. The period ends on the last complete day. When the files cover less than two periods, aztree shortens the period and says so.
+
+A file someone sends you works too: `aztree --focus costs.csv`.
+
+Advisor, the idle checks and the forecast need Azure, so they don't run on files. With `ActualCost`, the header shows reservation and savings plan purchases. aztree doesn't read Parquet exports yet.
+
 ## Options
 
 | Flag | What it does |
@@ -108,6 +128,7 @@ Give it to an AI agent and ask *"where can I save money?"*
 | `--subscription ID_OR_NAME` | Subscription to read; repeat for more. Default: the Azure CLI's current one |
 | `--all` | Every enabled subscription you can see, in every tenant you're logged in to |
 | `--scope SCOPE` | Any Cost Management scope, e.g. `/providers/Microsoft.Billing/billingAccounts/ID` (untested) |
+| `--focus PATH` | Read Cost Management FOCUS export files (CSV or CSV.gz) instead of calling Azure. A file or a folder; repeat for more |
 | `--days N` | Period length, default 30. It's always compared with the period before it. |
 | `--metric M` | `ActualCost` (default) or `AmortizedCost` |
 | `--no-advisor` | Skip Azure Advisor |

@@ -37,7 +37,7 @@ def main():
     exe = ".exe" if rid.startswith("win") else ""
 
     subprocess.run([sys.executable, "-m", "PyInstaller", "--onefile", "--name", "aztree", "--noconfirm", "--clean",
-                    "--paths", str(REPO), "--add-data", f"{REPO / 'aztree' / 'viewer.html'}{os.pathsep}aztree",
+                    "--paths", str(REPO), "--hidden-import", "aztree.focus", "--add-data", f"{REPO / 'aztree' / 'viewer.html'}{os.pathsep}aztree",
                     "--distpath", str(OUT / "dist"), "--workpath", str(OUT / "work"), "--specpath", str(OUT),
                     str(REPO / "aztree" / "__main__.py")], check=True)
     built = OUT / "dist" / f"aztree{exe}"
