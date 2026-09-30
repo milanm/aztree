@@ -132,6 +132,23 @@ class FindRunsTest(unittest.TestCase):
         with self.assertRaisesRegex(focus.FocusError, "no file or folder"):
             self.find(self.dir / "nope")
 
+    def test_a_manifest_that_isnt_an_object_says_so(self):
+        folder = write_run(self.dir / "run1", days(1, 2), "2026-09-01", "2026-09-02", "2026-09-03T00:00:00Z")
+        (folder / "manifest.json").write_text("[]", encoding="utf-8")
+        with self.assertRaisesRegex(focus.FocusError, "can't read the manifest"):
+            self.find(self.dir)
+
+    def test_odd_manifest_fields_are_left_out(self):
+        folder = write_run(self.dir / "run1", days(1, 2), "2026-09-01", "2026-09-02", "2026-09-03T00:00:00Z")
+        (folder / "manifest.json").write_text(json.dumps({"exportConfig": "x", "runInfo": [], "blobs": ["part_0_0001.csv"]}),
+                                              encoding="utf-8")
+        (run,) = self.find(self.dir)
+        self.assertEqual(([f.name for f in run["files"]], run["start"]), (["part_0_0001.csv"], None))
+
+    def test_the_same_file_twice_is_one_run(self):
+        f = write_csv(self.dir / "a.csv", days(1, 3))
+        self.assertEqual(len(self.find(f, f)), 1)
+
 
 PURCHASE = dict(ChargeCategory="Purchase", CommitmentDiscountType="Reservation", CommitmentDiscountName="VM_RI_03-10-2023_07-59",
                 ServiceName="Azure Reservations", ChargeDescription="Virtual Machines BS Series - B1s - US South Central",
@@ -227,6 +244,19 @@ class ReadRunTest(unittest.TestCase):
             self.read([row(1), row(2, ChargePeriodStart="")])
         with self.assertRaisesRegex(focus.FocusError, r"costs\.csv: row 2: .*abc"):
             self.read([row(1, "abc")])
+
+    def test_a_file_that_isnt_utf8_or_gzip_says_so(self):  # Excel's plain "CSV" is the ANSI code page
+        with self.assertRaisesRegex(focus.FocusError, "isn't UTF-8"):
+            self.read(days(1, 1, SubAccountName="café"), name="excel.csv", encoding="cp1252")
+        fake = self.dir / "fake.csv.gz"
+        fake.write_text("not gzip", encoding="utf-8")
+        (run,) = focus.find_runs([str(fake)], log=self.lines.append)
+        with self.assertRaisesRegex(focus.FocusError, "can't read"):
+            focus.read_run(run, focus.Rows("ActualCost"), log=self.lines.append)
+
+    def test_an_impossible_date_names_the_row(self):
+        with self.assertRaisesRegex(focus.FocusError, "row 2: ChargePeriodStart isn't a date"):
+            self.read([row(1, ChargePeriodStart="2026-02-30T00:00Z")])
 
 
 FETCH_KEYS = {"days", "split", "views", "currency", "subscriptions", "resource_fallback", "advisor", "advisor_error",
@@ -338,6 +368,18 @@ class ReadTest(unittest.TestCase):
         write_csv(self.dir / "a.csv", days(1, 2))  # the 2nd may be filling in: one complete day
         with self.assertRaisesRegex(focus.FocusError, "at least 2"):
             self.read()
+
+    def test_files_without_manifests_that_share_days_are_flagged(self):  # a download that left the manifests behind
+        write_csv(self.dir / "run-a" / "part_0_0001.csv", days(1, 20))
+        write_csv(self.dir / "run-b" / "part_0_0001.csv", days(1, 21))
+        self.read()
+        self.assertTrue(any("20 days appear in more than one file" in line for line in self.lines), self.lines)
+
+    def test_days_with_no_rows_in_the_window_are_flagged(self):  # July and September, but no August
+        write_run(self.dir / "jul", days(1, 31, month="2026-07"), "2026-07-01", "2026-07-31", "2026-08-02T05:00:00Z")
+        write_run(self.dir / "sep", days(1, 27), "2026-09-01", "2026-09-28", "2026-09-28T05:00:00Z")
+        self.assertEqual(len(self.read()["days"]), 60)
+        self.assertTrue(any("31 of the 60 days have no rows" in line for line in self.lines), self.lines)
 
 
 class FocusCliTest(unittest.TestCase):

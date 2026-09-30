@@ -9,6 +9,7 @@ import datetime as dt
 import gzip
 import json
 import re
+import zlib
 from collections import Counter
 from pathlib import Path
 
@@ -51,6 +52,10 @@ def file_run(path, named):
             "named": named}
 
 
+def obj(value):
+    return value if isinstance(value, dict) else {}
+
+
 def manifest_run(path, log):
     """The export run a manifest describes: the CSV files beside it (only those it lists, when it lists them) and the
     days it covers. None for an export that isn't FOCUS. Also returns the Parquet files found there."""
@@ -58,19 +63,22 @@ def manifest_run(path, log):
         manifest = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as e:
         raise FocusError(f"can't read the manifest {path}: {e}") from None
-    kind = str((manifest.get("exportConfig") or {}).get("type") or "")
+    if not isinstance(manifest, dict):
+        raise FocusError(f"can't read the manifest {path}: it isn't a JSON object")
+    kind = str(obj(manifest.get("exportConfig")).get("type") or "")
     if kind and "focus" not in kind.lower():
         log(f"  skipped {path.parent}: a {kind} export, not FOCUS")
         return None, []
     here = sorted(f for f in path.parent.iterdir() if f.is_file() and f.name.lower() not in MANIFESTS)
+    blobs = manifest.get("blobs") if isinstance(manifest.get("blobs"), list) else []
     listed = {str(b.get("blobName") or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
-              for b in manifest.get("blobs") or []} - {""}
+              for b in blobs if isinstance(b, dict)} - {""}
     missing = sorted(listed - {f.name for f in here})
     if missing:
         log(f"  {path.parent}: {len(missing)} of the manifest's files aren't here, so this run is incomplete: "
             f"{', '.join(missing[:3])}")
     files = [f for f in here if is_csv(f) and (not listed or f.name in listed)]
-    info = manifest.get("runInfo") or {}
+    info = obj(manifest.get("runInfo"))
     run = {"name": str(path.parent), "files": files, "start": day_of(info.get("startDate")),
            "end": day_of(info.get("endDate")), "submitted": day_of(info.get("submittedTime")),
            "submitted_at": str(info.get("submittedTime") or ""), "named": False}
@@ -111,6 +119,10 @@ def find_runs(paths, log=print):
         if parquet:
             raise FocusError("aztree reads CSV exports: set the export's format to CSV (Gzip is fine) and export again.")
         raise FocusError(f"no CSV export files in {', '.join(map(str, paths))}")
+    unique = {}
+    for run in runs:  # the same file or folder given twice is one run
+        unique.setdefault(str(Path(run["name"]).resolve()), run)
+    runs = list(unique.values())
     if parquet:
         log(f"  skipped {len(parquet)} Parquet file{'s' if len(parquet) > 1 else ''}: aztree reads CSV exports")
     return runs
@@ -188,19 +200,23 @@ class Rows:
         self.tagged = set()  # (resource id, raw Tags): the tag view's key is chosen from these
         self.purchases = {}  # day -> net cost of reservation and savings plan purchases (ActualCost only)
         self.last = {}  # run name -> the last day read from it
+        self.seen = {}  # run name -> the days read from it
         self.first = None  # the first day read
         self.files = self.rows = 0
 
     def add(self, run, col, row):
         day = row[col["ChargePeriodStart"]][:10]
-        if not DAY.match(day):
-            raise ValueError(f"ChargePeriodStart isn't a date: {row[col['ChargePeriodStart']]!r}")
+        try:
+            dt.date.fromisoformat(day if DAY.match(day) else "")  # the pattern keeps keys yyyy-mm-dd; this rejects 02-30
+        except ValueError:
+            raise ValueError(f"ChargePeriodStart isn't a date: {row[col['ChargePeriodStart']]!r}") from None
         allowed = run.get("days")
         if allowed is not None and day not in allowed:
             return  # a newer run owns this day
         self.rows += 1
         self.first = min(self.first or day, day)
         self.last[run["name"]] = max(self.last.get(run["name"], day), day)
+        self.seen.setdefault(run["name"], set()).add(day)
         cost, currency = number(row[col["cost"]]), row[col["BillingCurrency"]]
         usd = in_usd(row, col, cost, currency)
         self.currencies.setdefault(day, set()).add(currency)
@@ -228,26 +244,31 @@ def read_run(run, rows, log=print):
     """Add a run's files to `rows`. A file without the FOCUS columns stops a file named on the command line, and is
     skipped with a line when a folder held it."""
     for path in run["files"]:
-        with open_text(path) as f:
-            reader = csv.reader(f)
-            header = next(reader, [])
-            col, missing = columns(header, rows.metric)
-            if missing:
-                why = f"{path}: {NOT_FOCUS} (no {', '.join(missing)})"
-                if run["named"]:
-                    raise FocusError(why)
-                log(f"  skipped {why}")
-                continue
-            rows.files += 1
-            for n, row in enumerate(reader, 2):  # the header is row 1
-                if not row:
+        try:
+            with open_text(path) as f:
+                reader = csv.reader(f)
+                header = next(reader, [])
+                col, missing = columns(header, rows.metric)
+                if missing:
+                    why = f"{path}: {NOT_FOCUS} (no {', '.join(missing)})"
+                    if run["named"]:
+                        raise FocusError(why)
+                    log(f"  skipped {why}")
                     continue
-                if len(row) < len(header):
-                    raise FocusError(f"{path}: row {n} has {len(row)} of {len(header)} columns")
-                try:
-                    rows.add(run, col, row)
-                except ValueError as e:
-                    raise FocusError(f"{path}: row {n}: {e}") from None
+                rows.files += 1
+                for n, row in enumerate(reader, 2):  # the header is row 1
+                    if not row:
+                        continue
+                    if len(row) < len(header):
+                        raise FocusError(f"{path}: row {n} has {len(row)} of {len(header)} columns")
+                    try:
+                        rows.add(run, col, row)
+                    except ValueError as e:
+                        raise FocusError(f"{path}: row {n}: {e}") from None
+        except UnicodeDecodeError:
+            raise FocusError(f"{path} isn't UTF-8 text: save it as \"CSV UTF-8\" or download the export again") from None
+        except (OSError, EOFError, zlib.error) as e:  # a locked file, or a .gz that isn't gzip or is cut short
+            raise FocusError(f"can't read {path}: {e}") from None
 
 
 def shift(day, n):
@@ -371,6 +392,14 @@ def read(runs, days, metric, tag=None, log=print):
     bad = sum(v is None for v in parsed.values())
     if bad:
         log(f"  Tags that aren't JSON objects: {bad} distinct value{'s' if bad != 1 else ''}; their rows count as untagged")
+    repeated = sum(1 for n in Counter(d for r in opened for d in rows.seen.get(r["name"], ())).values() if n > 1)
+    if repeated:  # export runs never share a day, so a file without a manifest is in each of these
+        log(f"  {repeated} day{'s appear' if repeated != 1 else ' appears'} in more than one file without a manifest; "
+            "if the files are repeated runs of one export, keep their manifests or pass one file")
+    empty = [d for d in dates if d not in rows.currencies]
+    if empty:
+        log(f"  {len(empty)} of the {len(dates)} days have no rows in the files (the first is {empty[0]}); "
+            "download the export runs that cover them")
     found = set().union(*(rows.currencies.get(d, set()) for d in dates)) - {""}
     currency, usd, mixed, usd_rate = pick_currency(found, raw, log)
     many = len(rows.sub_names) > 1  # like fetch(): a group's label names its subscription when there are several
