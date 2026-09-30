@@ -4,6 +4,8 @@
 
 aztree shows where your Azure money went. It draws your costs as a treemap, where a bigger box means a bigger cost.
 
+**See it live on demo data:** [milanm.github.io/aztree](https://milanm.github.io/aztree/)
+
 ![aztree showing a demo Azure bill as a treemap](https://raw.githubusercontent.com/milanm/aztree/main/docs/screenshot.png)
 
 It's one small Python package with no dependencies. It writes a single HTML page that works offline.

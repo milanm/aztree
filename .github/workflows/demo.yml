@@ -1,0 +1,46 @@
+name: demo
+# The live demo on GitHub Pages: the released aztree's --demo page. It's rebuilt after each release, and weekly
+# because the demo counts its 30 days back from the day it's built.
+on:
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  deploy:
+    if: github.event_name != 'workflow_run' || startsWith(github.event.workflow_run.head_branch, 'v')
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Build the demo page from the release on PyPI
+        env:
+          TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          # after a release, that release (PyPI can take a minute to serve it); otherwise the latest
+          version="${TAG#v}"
+          [[ "$version" =~ ^[0-9]+(\.[0-9]+)*$ ]] && spec="aztree==$version" || spec="aztree"
+          for try in 1 2 3 4 5 6; do pip install --no-cache-dir "$spec" && break; sleep 30; done
+          aztree --version
+          mkdir site
+          AZTREE_HOME="$RUNNER_TEMP" aztree --demo --no-open --out site/index.html
+          grep -q '"demo":true' site/index.html
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v5
