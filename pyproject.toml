@@ -9,7 +9,7 @@ description = "See where your Azure money goes, as a treemap in one offline HTML
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "THIRD-PARTY-NOTICES.md"]
 authors = [{ name = "Milan Milanović" }]
 keywords = ["azure", "cost", "cost-management", "finops", "treemap"]
 classifiers = [
@@ -33,4 +33,4 @@ aztree = "aztree:main"
 path = "aztree/__init__.py"
 
 [tool.hatch.build.targets.sdist]
-include = ["aztree", "tests", "README.md", "LICENSE"]
+include = ["aztree", "tests", "README.md", "LICENSE", "THIRD-PARTY-NOTICES.md"]

@@ -42,7 +42,10 @@ The page opens in your browser. It shows the last 30 days, compared with the 30 
 - **Worth a look:** one list where news and to-dos take turns. The first six show, and "show all" opens the rest. On the map, the boxes a to-do is about have diagonal stripes.
   - **News** is costs that grew and one-off spikes (a day far above that meter's usual).
   - **To-dos** are known money pits (below) and compute left on all week in dev/test resource groups. When Advisor has no reservation or savings-plan tips, steady spend that a reservation could cut shows up too.
-  - **Idle resources** bill while doing nothing, and they count as to-dos. aztree finds them with Azure Resource Graph. It looks for VMs stopped but not deallocated, unattached disks and unused public IPs. It also looks for snapshots older than 90 days, empty App Service plans and NAT gateways on no subnet.
+  - **Idle resources** bill while doing nothing, and they count as to-dos. aztree finds them with Azure Resource Graph and lists the ones that cost something in the period.
+    - Compute and storage: VMs stopped but not deallocated, unattached disks, Premium disks of VMs deallocated for over 30 days, and snapshots older than 90 days or on Premium storage.
+    - Networking: unused public IPs, NAT gateways on no subnet, and VPN or ExpressRoute gateways with no connections. Also Application Gateways and load balancers with no backends, ExpressRoute circuits the provider hasn't set up, and disconnected private endpoints.
+    - Apps and databases: empty App Service plans and SQL elastic pools with no databases.
 - **Money pits it knows:**
   - Compute: retiring VM series with their retirement dates, Extended Security Updates, and Standard and Premium v2 App Service plans.
   - Networking: data transfer out, NAT and Firewall processing, public IPs, private endpoints, several Front Door profiles and Front Door Premium.
@@ -125,7 +128,8 @@ Give it to an AI agent and ask *"where can I save money?"*
 - Some subscriptions have so many resources that a daily breakdown takes more than ten pages of results. For those, the resource view still lists every resource, but with one total per period and no daily chart.
 - Marketplace charges keep their publisher's meter names and get no special handling.
 - The forecast is Azure's own, for the calendar month, so it doesn't follow `--days`. It's left out when a subscription has none, or when it comes in a different currency from the page.
-- Runs saved by older versions open without the tag view, the forecast and the idle checks.
+- Regions show under the portal's names, such as East US. Cost Management also uses short names (US East) and ARM names (eastus) for the same region, and aztree puts them in one box.
+- Runs saved by older versions open without the tag view, the forecast and the idle checks. They also show regions under Cost Management's own names, such as "us east".
 - Runs save to `~/.aztree/`; set `AZTREE_HOME` to move it. Older versions saved runs to `out/` when you ran them from a clone. To open those, run `aztree --from out/aztree-data.json`.
 
 ## Checking against the portal
@@ -156,6 +160,8 @@ The tests need no Azure access. The viewer tests run the page's script in Node a
 ## Credits
 
 aztree is a port of [awstree](https://github.com/petricbranko/awstree) by Branko Petric (MIT). It keeps awstree's viewer and its JSON contract and replaces the AWS parts. awstree, in turn, is inspired by [disktree](https://github.com/tobi/disktree) by [Tobi Lütke](https://x.com/tobi).
+
+The region names and several idle checks come from Microsoft's [FinOps toolkit](https://github.com/microsoft/finops-toolkit) (MIT). See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 aztree is not affiliated with or endorsed by Microsoft.
 

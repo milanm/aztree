@@ -326,23 +326,55 @@ def month_forecast(az, target, metric, today, column="Cost"):
 
 GRAPH_API = "2022-10-01"
 MAX_GRAPH_ROWS = 5000
-# Resources that bill while doing nothing. One pass with case(): Resource Graph caps how many unions a query may have.
-IDLE_QUERY = """resources
+# Resources that bill while doing nothing. Most need one look at the resource itself: one pass with case(), since
+# Resource Graph caps how many unions and joins a query may have. Gateways and elastic pools are idle only when
+# no other resource points at them, so they take a second query with a join. Several checks follow the FinOps
+# toolkit's optimization workbooks (github.com/microsoft/finops-toolkit, MIT).
+IDLE_QUERIES = ["""resources
 | extend check = case(
     type =~ 'microsoft.compute/virtualmachines' and tostring(properties.extended.instanceView.powerState.code) =~ 'PowerState/stopped', 'stopped-vm',
     type =~ 'microsoft.compute/disks' and tostring(properties.diskState) =~ 'Unattached', 'unattached-disk',
+    type =~ 'microsoft.compute/disks' and tostring(properties.diskState) =~ 'Reserved' and tostring(sku.name) startswith 'Premium' and todatetime(properties.LastOwnershipUpdateTime) < ago(30d), 'premium-disk-off',
     type =~ 'microsoft.network/publicipaddresses' and isempty(tostring(properties.ipConfiguration.id)) and isempty(tostring(properties.natGateway.id)), 'unused-ip',
     type =~ 'microsoft.compute/snapshots' and todatetime(properties.timeCreated) < ago(90d), 'old-snapshot',
+    type =~ 'microsoft.compute/snapshots' and tostring(sku.name) startswith 'Premium', 'premium-snapshot',
     type =~ 'microsoft.web/serverfarms' and toint(properties.numberOfSites) == 0, 'empty-plan',
     type =~ 'microsoft.network/natgateways' and coalesce(array_length(properties.subnets), 0) == 0, 'lonely-nat',
+    type =~ 'microsoft.network/applicationgateways' and not(tostring(properties.backendAddressPools) has_any ('ipAddress', 'fqdn', 'ipConfigurations')), 'empty-appgw',
+    type =~ 'microsoft.network/loadbalancers' and coalesce(array_length(properties.backendAddressPools), 0) == 0 and coalesce(array_length(properties.inboundNatRules), 0) == 0, 'empty-lb',
+    type =~ 'microsoft.network/expressroutecircuits' and tostring(properties.serviceProviderProvisioningState) =~ 'NotProvisioned', 'unprovisioned-circuit',
+    type =~ 'microsoft.network/privateendpoints' and strcat(properties.privateLinkServiceConnections[0].properties.privateLinkServiceConnectionState.status, properties.manualPrivateLinkServiceConnections[0].properties.privateLinkServiceConnectionState.status) =~ 'Disconnected', 'disconnected-endpoint',
     '')
 | where check != ''
-| project check, id = tolower(id), name, resourceGroup, subscriptionId"""
+| project check, id = tolower(id), name, resourceGroup, subscriptionId""",
+                """resources
+| where type =~ 'microsoft.network/virtualnetworkgateways' and coalesce(array_length(properties.vpnClientConfiguration.vpnClientAddressPool.addressPrefixes), 0) == 0
+| extend key = tolower(id)
+| join kind=leftouter (
+    resources
+    | where type =~ 'microsoft.network/connections'
+    | mv-expand gateway = pack_array(properties.virtualNetworkGateway1.id, properties.virtualNetworkGateway2.id) to typeof(string)
+    | summarize connections = count() by key = tolower(gateway)
+  ) on key
+| where isnull(connections)
+| extend check = 'lonely-gateway'
+| union (
+    resources
+    | where type =~ 'microsoft.sql/servers/elasticpools'
+    | extend key = tolower(id)
+    | join kind=leftouter (
+        resources
+        | where type =~ 'microsoft.sql/servers/databases' and isnotempty(properties.elasticPoolId)
+        | summarize databases = count() by key = tolower(tostring(properties.elasticPoolId))
+      ) on key
+    | where isnull(databases)
+    | extend check = 'empty-pool')
+| project check, id = tolower(id), name, resourceGroup, subscriptionId"""]
 
 
 def graph_findings(az, targets, log=print):
-    """What IDLE_QUERY finds in Azure Resource Graph: one query per tenant (tokens are per tenant) for all of
-    that tenant's subscriptions, at most MAX_GRAPH_ROWS rows in all. A tenant that says no is skipped, like a
+    """What IDLE_QUERIES find in Azure Resource Graph: each query once per tenant (tokens are per tenant) for all
+    of that tenant's subscriptions, at most MAX_GRAPH_ROWS rows in all. A tenant that says no is skipped, like a
     subscription without Advisor access: returns what the others found and the first failure's status, or None."""
     tenants = {}
     for t in targets:
@@ -353,16 +385,17 @@ def graph_findings(az, targets, log=print):
             subs.append(sub.group(1))
     found, error = [], None
     for tenant, subs in tenants.items():
-        options = {"resultFormat": "objectArray", "$top": 1000}
         try:
-            while len(found) < MAX_GRAPH_ROWS:
-                page = az.call("POST", f"/providers/Microsoft.ResourceGraph/resources?api-version={GRAPH_API}",
-                               {"subscriptions": subs, "query": IDLE_QUERY, "options": options}, tenant=tenant)
-                found += [{k: row.get(k) for k in ("check", "id", "name", "resourceGroup", "subscriptionId")}
-                          for row in page.get("data", [])]
-                if not page.get("$skipToken"):
-                    break
-                options = {**options, "$skipToken": page["$skipToken"]}
+            for query in IDLE_QUERIES:
+                options = {"resultFormat": "objectArray", "$top": 1000}
+                while len(found) < MAX_GRAPH_ROWS:
+                    page = az.call("POST", f"/providers/Microsoft.ResourceGraph/resources?api-version={GRAPH_API}",
+                                   {"subscriptions": subs, "query": query, "options": options}, tenant=tenant)
+                    found += [{k: row.get(k) for k in ("check", "id", "name", "resourceGroup", "subscriptionId")}
+                              for row in page.get("data", [])]
+                    if not page.get("$skipToken"):
+                        break
+                    options = {**options, "$skipToken": page["$skipToken"]}
         except Exception as e:  # needs Reader, like Advisor; the cost data alone is still worth a page
             # keep only the status: Azure's 403 text names the caller, and this lands in the AI export
             error = error or (f"HTTP {e.status}" if isinstance(e, AzureError) else type(e).__name__)
@@ -394,6 +427,57 @@ def group_key(target, rg, resource_id):
     m = re.match(r"/subscriptions/[^/]+", resource_id or "", re.I)
     sub = m.group(0).lower() if m else target["scope"].lower()
     return f"{sub}/resourcegroups/{rg.lower()}" if rg else sub
+
+
+# Cost Management spells a region three ways: its own short names ("US East", "EU West"), ARM names ("eastus") and
+# the portal's ("East US"). From the FinOps toolkit's open data (github.com/microsoft/finops-toolkit, Regions.csv, MIT).
+REGIONS = ("Asia Pacific|Australia|Australia Central|Australia Central 2|Australia East|Australia Southeast|Austria East|"
+           "Azure Stack|Belgium Central|Brazil South|Brazil Southeast|Canada Central|Canada East|Central India|Central US|"
+           "Central US EUAP|Chile Central|China East|China East 2|China East 3|China North|China North 2|China North 3|"
+           "Denmark East|East Asia|East US|East US 2|East US 2 EUAP|East US 3|Finland Central|France Central|France South|"
+           "Germany Central|Germany North|Germany NorthEast|Germany West Central|Global|Greece Central|India South Central|"
+           "Indonesia Central|Israel Central|Italy North|Japan|Japan East|Japan West|Jio India Central|Jio India West|"
+           "Korea Central|Korea South|Malaysia South|Malaysia West|Mexico Central|New Zealand North|North Central US|"
+           "North Europe|Norway East|Norway West|Poland Central|Qatar Central|Saudi Arabia East|Singapore Central|"
+           "South Africa North|South Africa West|South Central US|South Central US 2|South Central US STG|South India|"
+           "Southeast Asia|Southeast US|Spain Central|Sweden Central|Sweden South|Switzerland North|Switzerland West|"
+           "Taiwan North|Taiwan Northwest|UAE Central|UAE North|UK North|UK South|UK South 2|UK West|US East 2 EUAP|"
+           "USDoD Central|USDoD East|USGov Arizona|USGov Iowa|USGov Texas|USGov Virginia|USGov Wyoming|USSec East|"
+           "USSec West|USSec West Central|United States|West Central US|West Europe|West India|West US|West US 2|"
+           "West US 3").split("|")
+# only the short names that aren't the portal's name without its spaces ("us gov virginia" is "usgovvirginia")
+SHORT_REGIONS = {"ae central": "UAE Central", "ae north": "UAE North", "ap east": "East Asia",
+                 "ap southeast": "Southeast Asia", "at east": "Austria East", "au central": "Australia Central",
+                 "au central 2": "Australia Central 2", "au east": "Australia East", "au southeast": "Australia Southeast",
+                 "be central": "Belgium Central", "br south": "Brazil South", "br southeast": "Brazil Southeast",
+                 "ca central": "Canada Central", "ca east": "Canada East", "ch north": "Switzerland North",
+                 "ch west": "Switzerland West", "cl central": "Chile Central", "cn east": "China East",
+                 "cn east 2": "China East 2", "cn east 3": "China East 3", "cn north": "China North",
+                 "cn north 2": "China North 2", "cn north 3": "China North 3", "de central": "Germany Central",
+                 "de north": "Germany North", "de northeast": "Germany NorthEast", "de west central": "Germany West Central",
+                 "es central": "Spain Central", "eu north": "North Europe", "eu west": "West Europe",
+                 "fi central": "Finland Central", "fr central": "France Central", "fr south": "France South",
+                 "gr central": "Greece Central", "id central": "Indonesia Central", "il central": "Israel Central",
+                 "in central": "Central India", "in central jio": "Jio India Central", "in south": "South India",
+                 "in south central": "India South Central", "in west": "West India", "in west jio": "Jio India West",
+                 "it north": "Italy North", "ja east": "Japan East", "ja west": "Japan West", "kr central": "Korea Central",
+                 "kr south": "Korea South", "mx central": "Mexico Central", "my west": "Malaysia West",
+                 "no east": "Norway East", "no west": "Norway West", "nz north": "New Zealand North",
+                 "pl central": "Poland Central", "qa central": "Qatar Central", "sa east": "Saudi Arabia East",
+                 "se central": "Sweden Central", "se south": "Sweden South", "tw north": "Taiwan North",
+                 "us central": "Central US", "us east": "East US", "us east 2": "East US 2", "us east 3": "East US 3",
+                 "us gov az": "USGov Arizona", "us gov tx": "USGov Texas", "us north central": "North Central US",
+                 "us south central": "South Central US", "us west": "West US", "us west 2": "West US 2",
+                 "us west 3": "West US 3", "us west central": "West Central US", "za north": "South Africa North",
+                 "za west": "South Africa West"}
+REGION_NAMES = {**{r.lower().replace(" ", ""): r for r in REGIONS}, **SHORT_REGIONS}
+
+
+def region_name(location):
+    """'US East', 'eastus' or 'East US' -> 'East US', so one region is one box. A name it doesn't know stays as Azure
+    sent it, in lower case like before."""
+    v = (location or "").strip().lower()
+    return REGION_NAMES.get(v) or REGION_NAMES.get(v.replace(" ", "")) or v
 
 
 def last_full_day(today=None):
@@ -468,7 +552,7 @@ def fetch(az, targets, days, metric, advisor=True, log=print, today=None, tag=No
 
         log(f"  {t['name']}: regions ...")
         for r in run(t, VIEWS["region"]):
-            add("region", ((r.get("ResourceLocation") or "").lower(), service_of(r)), r)
+            add("region", (region_name(r.get("ResourceLocation")), service_of(r)), r)
         if tag:
             log(f"  {t['name']}: tag {tag} ...")
             try:
@@ -643,6 +727,9 @@ DEMO = [
     ("Key Vault", "Operations", 0.3, 0, [(P, "us east", "rg-app-prod", "microsoft.keyvault/vaults/kv-app-prod", 1)]),
     # its VM was deleted, the disk wasn't: Resource Graph finds it unattached (demo_graph)
     ("Storage", "P10 LRS Disk", 0.65, 0, [(S, "us east", "rg-legacy", "microsoft.compute/disks/vm-old-ftp-osdisk", 1)]),
+    # the site-to-site VPN to the old office: the office closed, the gateway didn't (demo_graph finds it unused)
+    ("VPN Gateway", "VpnGw1", 4.56, 0, [(S, "us east", "rg-network-staging",
+                                        "microsoft.network/virtualnetworkgateways/vgw-staging", 1)]),
 ]
 
 
@@ -683,7 +770,8 @@ def demo_graph():
 
     return [found("unattached-disk", S, "rg-legacy", "microsoft.compute/disks/vm-old-ftp-osdisk"),
             found("old-snapshot", P, "rg-backup", "microsoft.compute/snapshots/snap-vm-app-01-2025"),
-            found("unused-ip", X, "rg-sandbox", "microsoft.network/publicipaddresses/pip-old-test")]
+            found("unused-ip", X, "rg-sandbox", "microsoft.network/publicipaddresses/pip-old-test"),
+            found("lonely-gateway", S, "rg-network-staging", "microsoft.network/virtualnetworkgateways/vgw-staging")]
 
 
 def demo_forecast(views, dates, today):
@@ -711,7 +799,7 @@ def demo(days, today=None):
     for service, meter, per_day, growth, spots in DEMO:
         bursty = any(w in meter for w in ("Tokens", "Data Transfer", "Ingestion", "Operations", "Processed", "Duration"))
         # plans, provisioned databases, nodes and gateways bill a fixed hourly price: the same every day, like real bills
-        fixed = re.search(r"App$|vCore|Instance|Node$|Uptime SLA|Unit$|Gateway$|Endpoint$|Public IP$|Base Fees|Disk$", meter)
+        fixed = re.search(r"App$|vCore|Instance|Node$|Uptime SLA|Unit$|Gateway$|^VpnGw|Endpoint$|Public IP$|Base Fees|Disk$", meter)
         for sub, region, rg, path, share in spots:
             daily = []
             for i in range(n):
@@ -723,7 +811,7 @@ def demo(days, today=None):
             gkey = group_key({"scope": f"/subscriptions/{sub}"}, rg, rid)
             names["resource"][gkey] = f"{rg or '(no resource group)'} · {DEMO_SUBS[sub]}"
             for view, key in (("service", (service, meter)), ("subscription", (sub, service)),
-                              ("region", (region, service)), ("resource", (gkey, rid)),
+                              ("region", (region_name(region), service)), ("resource", (gkey, rid)),
                               ("tag", (demo_env(sub, rg), service))):
                 acc = rows[view].setdefault(key, [0.0] * n)
                 for i, v in enumerate(daily):
@@ -732,14 +820,14 @@ def demo(days, today=None):
     rid = demo_rid(P, "rg-data-prod", "microsoft.documentdb/databaseaccounts/cosmos-catalog")
     gkey = group_key({"scope": f"/subscriptions/{P}"}, "rg-data-prod", rid)
     for view, key in (("service", ("Azure Cosmos DB", "Reserved 100 RU/s")), ("subscription", (P, "Azure Cosmos DB")),
-                      ("region", ("us east", "Azure Cosmos DB")), ("resource", (gkey, rid)),
+                      ("region", ("East US", "Azure Cosmos DB")), ("resource", (gkey, rid)),
                       ("tag", (demo_env(P, "rg-data-prod"), "Azure Cosmos DB"))):
         rows[view].setdefault(key, [0.0] * n)[max(days, n - 6)] -= 150.0
     # a one-off backfill: Data Factory moved a year of data in one day, a spike for "worth a look"
     rid = demo_rid(D, "rg-etl", "microsoft.datafactory/factories/adf-etl")
     gkey = group_key({"scope": f"/subscriptions/{D}"}, "rg-etl", rid)
     for view, key in (("service", ("Azure Data Factory v2", "Cloud Data Movement")), ("subscription", (D, "Azure Data Factory v2")),
-                      ("region", ("eu west", "Azure Data Factory v2")), ("resource", (gkey, rid)),
+                      ("region", ("West Europe", "Azure Data Factory v2")), ("resource", (gkey, rid)),
                       ("tag", (demo_env(D, "rg-etl"), "Azure Data Factory v2"))):
         rows[view].setdefault(key, [0.0] * n)[max(days, n - 9)] += 180.0
     views = {v: {"dims": VIEWS[v], "names": names[v], "rows": pack(rows[v])} for v in VIEWS}
@@ -869,8 +957,10 @@ AI_INSTRUCTIONS = (
     "`by_tag` splits the bill by the values of the tag named in `tag`; the row marked `untagged: true` (shown as "
     "\"(untagged)\") is spend on resources without it. `forecast` is Azure's own forecast for the current calendar month: `actual` is billed so far, `forecast` is "
     "still to come and `total` is both. Hints of kind `idle` are resources Azure Resource Graph found billing while "
-    "doing nothing (VMs stopped but still allocated, unattached disks, unused public IPs, snapshots older than 90 "
-    "days, App Service plans with no apps, NAT gateways on no subnet), with what they cost in the current period. "
+    "doing nothing (VMs stopped but still allocated, unattached disks, Premium disks of long-stopped VMs, old or "
+    "Premium snapshots, unused public IPs, gateways, load balancers and Application Gateways that nothing uses, "
+    "disconnected private endpoints, App Service plans with no apps, elastic pools with no databases), with what they "
+    "cost in the current period. "
     "Please: 1) explain what drives the cost, 2) explain notable changes vs the previous period, "
     "3) suggest concrete savings, each with an estimated monthly saving and how to verify it. "
     "Levers to consider: reservations and savings plans for steady compute and databases; Azure Hybrid Benefit for "
@@ -1003,17 +1093,36 @@ def steady(data, line_keys, n, rate=1.0):
             for svc, s in by_service.items() if s["current"] / n * 30.4 >= 100 * rate]
 
 
-# Resource Graph checks (see IDLE_QUERY): what one is called, what several are called, and what to do
+# Resource Graph checks (see IDLE_QUERIES): what one is called, what several are called, and what to do
 IDLE = {
     "stopped-vm": ("stopped VM", "stopped VMs",
                    "stopped from inside the OS but still allocated, so compute keeps billing; Stop in the portal deallocates"),
     "unattached-disk": ("unattached disk", "unattached disks", "attached to no VM; snapshot what you need, then delete"),
+    "premium-disk-off": ("Premium disk of a stopped VM", "Premium disks of stopped VMs",
+                         "the VM has been deallocated for over 30 days, but a Premium disk bills the same; switch it to "
+                         "Standard HDD while the VM stays off"),
     "unused-ip": ("unused public IP", "unused public IPs",
                   "attached to nothing, and public IPs bill by the hour; release what nothing uses"),
     "old-snapshot": ("old snapshot", "old snapshots", "older than 90 days; delete what no restore plan needs"),
+    "premium-snapshot": ("snapshot on Premium storage", "snapshots on Premium storage",
+                         "a full copy at Premium prices; incremental snapshots on Standard storage cost less"),
     "empty-plan": ("empty App Service plan", "empty App Service plans",
                    "no apps, but a plan bills by the hour whether used or not; delete or scale down"),
     "lonely-nat": ("unused NAT gateway", "unused NAT gateways", "on no subnet, so routing nothing, but billed by the hour"),
+    "empty-appgw": ("Application Gateway with no backends", "Application Gateways with no backends",
+                    "its backend pools are empty, so it routes to nothing, but it bills by the hour; stop or delete it"),
+    "empty-lb": ("load balancer with no backends", "load balancers with no backends",
+                 "no backend pool or NAT rule, so it balances nothing, but it still bills; delete it"),
+    "unprovisioned-circuit": ("unprovisioned ExpressRoute circuit", "unprovisioned ExpressRoute circuits",
+                              "the connectivity provider hasn't set it up, or took it down, but the circuit bills; "
+                              "finish the setup or delete it"),
+    "disconnected-endpoint": ("disconnected private endpoint", "disconnected private endpoints",
+                              "what it pointed to is gone or refused it, but it bills by the hour; delete it"),
+    "lonely-gateway": ("unused VPN or ExpressRoute gateway", "unused VPN or ExpressRoute gateways",
+                       "no connections and no point-to-site clients, but a gateway bills by the hour; delete what "
+                       "nothing will connect to"),
+    "empty-pool": ("empty SQL elastic pool", "empty SQL elastic pools",
+                   "no databases, but a pool bills for its capacity; delete it or move databases in"),
 }
 IDLE_FLOOR = 1.0  # dollars over the period: a check that costs less isn't worth a line
 

@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -317,7 +318,8 @@ class Router:
         self.other.append(("graph", body, headers["Authorization"]))
         if isinstance(self.findings, int):
             return error(self.findings, "AuthorizationFailed", "no Resource Graph for you")
-        pages = self.findings or [[]]
+        # each query answers the findings whose check it names
+        pages = [[f for f in p if f"'{f['check']}'" in body["query"]] for p in self.findings or [[]]]
         i = int(body["options"].get("$skipToken") or 0)
         out = {"totalRecords": sum(map(len, pages)), "count": len(pages[i]), "data": pages[i],
                "facets": [], "resultTruncated": "false"}
@@ -383,9 +385,34 @@ class FetchTest(unittest.TestCase):
         self.assertEqual(data["views"]["subscription"]["names"], {"aaaa-1": "acme-prod"})
         self.assertEqual(len(router.bodies), 3)  # service, resource and region queries only
 
-    def test_region_view(self):
-        data, _ = fetch(ONE_SUB)
-        self.assertEqual(list(rows_of(data, "region")), [("us central", "Azure App Service")])
+    def test_region_view_names_regions_as_the_portal_does(self):
+        data, _ = fetch(ONE_SUB)  # Cost Management says "us central"
+        self.assertEqual(list(rows_of(data, "region")), [("Central US", "Azure App Service")])
+
+    def test_two_spellings_of_a_region_are_one_box(self):
+        tables = {("ResourceLocation", "ServiceName"): {"/subscriptions/aaaa-1": [
+            (20260925, "US East", "Storage", 1.0, "USD", None),
+            (20260925, "eastus", "Storage", 2.0, "USD", None),
+        ]}}
+        data, _ = fetch(tables)
+        self.assertEqual(rows_of(data, "region"), {("East US", "Storage"): [0, 0, 0, 3.0, 0, 0]})
+
+
+class RegionNameTest(unittest.TestCase):
+    def test_cost_managements_short_names(self):
+        for short, name in [("us east", "East US"), ("US West 2", "West US 2"), ("eu west", "West Europe"),
+                            ("ap east", "East Asia"), ("us north central", "North Central US"), ("ja east", "Japan East")]:
+            self.assertEqual(aztree.region_name(short), name)
+
+    def test_arm_names_and_portal_names(self):
+        for given, name in [("eastus2", "East US 2"), ("westeurope", "West Europe"), ("West Europe", "West Europe"),
+                            ("uksouth", "UK South"), ("global", "Global")]:
+            self.assertEqual(aztree.region_name(given), name)
+
+    def test_what_it_doesnt_know_stays_as_azure_sent_it(self):
+        self.assertEqual(aztree.region_name("Zone 1"), "zone 1")  # lower case, as before: "Zone 1" and "zone 1" are one box
+        self.assertEqual(aztree.region_name(""), "")
+        self.assertEqual(aztree.region_name(None), "")
 
     def test_resource_view_keys_groups_by_their_arm_id(self):
         data, _ = fetch(ONE_SUB)
@@ -578,13 +605,24 @@ class GraphTest(unittest.TestCase):
     def graph_calls(self, router):
         return [c for c in router.other if c[0] == "graph"]
 
-    def test_one_query_for_the_subscriptions_of_a_tenant(self):
+    def test_the_subscriptions_of_a_tenant_are_asked_together(self):
         tables = {("ServiceName", "Meter"): {"/subscriptions/aaaa-1": [], "/subscriptions/bbbb-2": []}}
         data, router = fetch(tables, targets=(PROD, DEV), findings=[[IDLE_DISK]])
-        ((_, body, _),) = self.graph_calls(router)
-        self.assertEqual(body["subscriptions"], ["aaaa-1", "bbbb-2"])
-        self.assertIn("unattached-disk", body["query"])
+        bodies = [body for _, body, _ in self.graph_calls(router)]
+        self.assertEqual([b["subscriptions"] for b in bodies], [["aaaa-1", "bbbb-2"]] * len(aztree.IDLE_QUERIES))
+        self.assertIn("unattached-disk", bodies[0]["query"])
         self.assertEqual((data["graph"], data["graph_error"]), ([IDLE_DISK], None))
+
+    def test_checks_that_need_a_join_have_their_own_query(self):
+        # Resource Graph allows few joins and unions in one query, so these don't fit the one-pass case()
+        gateway = {**IDLE_DISK, "check": "lonely-gateway", "id": IDLE_DISK["id"].replace("compute/disks", "network/virtualnetworkgateways")}
+        data, router = fetch(ONE_SUB, findings=[[IDLE_DISK, gateway]])
+        self.assertEqual(data["graph"], [IDLE_DISK, gateway])
+        self.assertEqual(len(self.graph_calls(router)), 2)
+
+    def test_a_tenant_that_says_no_is_asked_once(self):
+        _, router = fetch(ONE_SUB, findings=403)
+        self.assertEqual(len(self.graph_calls(router)), 1)
 
     def test_follows_skip_tokens(self):
         other = {**IDLE_DISK, "id": IDLE_DISK["id"] + "2", "name": "d2"}
@@ -604,8 +642,9 @@ class GraphTest(unittest.TestCase):
         targets = [aztree.subscription_target({"id": "aaaa-1", "name": "a", "tenant": "t-one"}),
                    aztree.subscription_target({"id": "bbbb-2", "name": "b", "tenant": "t-two"})]
         aztree.graph_findings(az, targets)
+        n = len(aztree.IDLE_QUERIES)
         self.assertEqual([(c[1]["subscriptions"], c[2]) for c in self.graph_calls(router)],
-                         [(["aaaa-1"], "Bearer tok-t-one"), (["bbbb-2"], "Bearer tok-t-two")])
+                         [(["aaaa-1"], "Bearer tok-t-one")] * n + [(["bbbb-2"], "Bearer tok-t-two")] * n)
 
     def test_without_access_the_run_goes_on_and_keeps_only_the_status(self):
         lines = []
@@ -970,6 +1009,13 @@ class IdleHintsTest(unittest.TestCase):
     def test_unknown_checks_are_ignored(self):
         self.assertEqual(self.idle(self.data([self.finding("something-new", self.DISK)])), [])
 
+    def test_every_check_the_queries_find_has_words(self):
+        # a check the queries find but IDLE doesn't describe would be dropped without a word
+        found = {c for q in aztree.IDLE_QUERIES for c in re.findall(r"'([a-z]+(?:-[a-z]+)+)'", q)}
+        self.assertEqual(found, set(aztree.IDLE))
+        self.assertGreaterEqual(found, {"lonely-gateway", "empty-pool", "empty-appgw", "empty-lb", "premium-disk-off",
+                                        "premium-snapshot", "unprovisioned-circuit", "disconnected-endpoint"})
+
     def test_they_sort_with_the_other_to_dos(self):
         data = self.data([self.finding("unattached-disk", self.DISK)])
         data["views"]["service"]["rows"].append({"k": ["Log Analytics", "Analytics Logs Data Ingestion"], "d": [1] * 6})
@@ -1325,7 +1371,11 @@ class Batch4DemoTest(unittest.TestCase):
 
     def test_has_idle_resources_that_cost_something(self):
         checks = {h["check"] for h in self.summary["hints"] if h["kind"] == "idle"}
-        self.assertEqual(checks, {"unattached-disk", "old-snapshot", "unused-ip"})
+        self.assertEqual(checks, {"unattached-disk", "old-snapshot", "unused-ip", "lonely-gateway"})
+
+    def test_regions_have_the_portals_names(self):
+        regions = {r["k"][0] for r in self.data["views"]["region"]["rows"]}
+        self.assertEqual(regions, {"East US", "East US 2", "West US 2", "West Europe", "Global"})
 
 
 class Batch4CliTest(unittest.TestCase):
@@ -1434,7 +1484,7 @@ class ReviewFixesTest(unittest.TestCase):
         data, _ = fetch(tables)
         self.assertIn(("(no service)", "Something"), rows_of(data, "service"))
         self.assertIn(("aaaa-1", "(no service)"), rows_of(data, "subscription"))
-        self.assertIn(("us central", "(no service)"), rows_of(data, "region"))
+        self.assertIn(("Central US", "(no service)"), rows_of(data, "region"))
         aztree.summarize(data)
 
     def test_advisor_error_keeps_only_the_status(self):
@@ -2583,8 +2633,8 @@ class V051ReviewTest(unittest.TestCase):
                 router = Router({}, findings=[[]])
                 aztree.fetch(client(router), [aztree.scope_target(scope)], 3, "ActualCost", advisor=False,
                              log=lambda *a: None, today=TODAY)
-                (call,) = [c for c in router.other if c[0] == "graph"]
-                self.assertEqual(call[1]["subscriptions"], ["aaaa-1"])
+                calls = [c for c in router.other if c[0] == "graph"]
+                self.assertEqual([c[1]["subscriptions"] for c in calls], [["aaaa-1"]] * len(aztree.IDLE_QUERIES))
 
     # 4. keyboard
     @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
