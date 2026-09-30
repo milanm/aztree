@@ -1252,6 +1252,11 @@ class ViewerTest(unittest.TestCase):
                 self.assertIn("acme-prod", page["meta"])
 
     @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_the_top_line_leaves_the_credits_to_the_readme(self):
+        page = self.run_page(make_data([("Storage", "LRS", [1] * 6)]), "service")
+        self.assertNotIn("awstree", page["meta"])
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
     def test_amounts_use_the_billing_currency(self):
         page = self.run_page(make_data([("Storage", "LRS", [100] * 6)], currency="EUR"), "service")
         self.assertIn("€300", page["sub"])
