@@ -229,5 +229,116 @@ class ReadRunTest(unittest.TestCase):
             self.read([row(1, "abc")])
 
 
+FETCH_KEYS = {"days", "split", "views", "currency", "subscriptions", "resource_fallback", "advisor", "advisor_error",
+              "mixed_currencies", "usd_rate", "forecast", "forecast_note", "graph", "graph_error", "demo"}
+
+
+class ReadTest(unittest.TestCase):
+    def setUp(self):
+        self.dir, self.lines = scratch(self), []
+
+    def read(self, *paths, days=30, metric="ActualCost", tag=None):
+        runs = focus.find_runs([str(p) for p in paths or [self.dir]], log=self.lines.append)
+        return focus.read(runs, days, metric, tag, log=self.lines.append)
+
+    @staticmethod
+    def total(data, view="service"):
+        return round(sum(sum(r["d"]) for r in data["views"][view]["rows"]), 4)
+
+    def test_a_file_ending_mid_month_drops_its_last_day(self):  # the sample ends on a half-filled day
+        write_csv(self.dir / "a.csv", days(1, 10))
+        data = self.read()
+        self.assertEqual((data["days"][0], data["days"][-1], data["split"]), ("2026-09-02", "2026-09-09", 4))
+        self.assertTrue(any("filling in" in line for line in self.lines), self.lines)
+        self.assertTrue(any("the files cover 9 days, so the period is 4 days" in line for line in self.lines), self.lines)
+
+    def test_a_file_ending_on_a_months_last_day_keeps_it(self):
+        write_csv(self.dir / "a.csv", days(1, 30))
+        self.assertEqual(self.read()["days"][-1], "2026-09-30")
+
+    def test_the_newest_run_owns_each_day(self):  # overwrite off: yesterday's month-to-date copy is still there
+        write_run(self.dir / "run-19", days(1, 19, 5.0), "2026-09-01", "2026-09-19", "2026-09-19T05:00:00Z")
+        write_run(self.dir / "run-20", days(1, 20, 1.0), "2026-09-01", "2026-09-20", "2026-09-20T05:00:00Z")
+        data = self.read()
+        self.assertEqual(data["days"][-1], "2026-09-18")  # submitted on the 20th: the 19th may still be filling in
+        self.assertEqual(self.total(data), 18.0)
+        self.assertEqual(data["source"]["files"], 1)  # the older run owns no day, so it isn't opened
+        self.assertTrue(any("skipped 19 days" in line for line in self.lines), self.lines)
+
+    def test_a_months_first_days_rewrite_the_month_before(self):
+        write_run(self.dir / "aug", days(1, 31, month="2026-08"), "2026-08-01", "2026-08-31", "2026-09-01T03:00:00Z")
+        write_run(self.dir / "sep", days(1, 1), "2026-09-01", "2026-09-01", "2026-09-01T05:00:00Z")
+        self.assertEqual(self.read()["days"][-1], "2026-08-30")
+        shutil.rmtree(self.dir / "aug")
+        shutil.rmtree(self.dir / "sep")
+        write_run(self.dir / "aug", days(1, 31, month="2026-08"), "2026-08-01", "2026-08-31", "2026-09-05T03:00:00Z")
+        write_run(self.dir / "sep", days(1, 4), "2026-09-01", "2026-09-05", "2026-09-05T05:00:00Z")
+        self.assertEqual(self.read()["days"][-1], "2026-09-03")
+
+    def test_a_run_outside_the_window_is_not_opened(self):
+        write_run(self.dir / "jul", days(1, 31, month="2026-07"), "2026-07-01", "2026-07-31", "2026-08-02T05:00:00Z")
+        write_run(self.dir / "sep", days(1, 27), "2026-09-01", "2026-09-28", "2026-09-28T05:00:00Z")
+        data = self.read(days=7)
+        self.assertEqual((data["days"][0], data["days"][-1]), ("2026-09-13", "2026-09-26"))
+        self.assertEqual(data["source"]["files"], 1)
+
+    def test_the_tag_on_the_most_resources(self):
+        vm2, vm3 = VM.replace("vm1", "vm2"), VM.replace("vm1", "vm3")
+        write_csv(self.dir / "a.csv", days(1, 30, Tags='{"env": "prod", " org": "a"}')
+                  + days(1, 30, ResourceId=vm2, Tags='{"Env": "dev"}') + days(1, 30, ResourceId=vm3, Tags='{"org": "b"}'))
+        view = self.read()["views"]["tag"]
+        self.assertEqual(view["tag"], "env")  # env and Env are one key on two resources; " org" and org one each
+        self.assertEqual({r["k"][0] for r in view["rows"]}, {"prod", "dev", ""})
+
+    def test_tags_that_are_not_text_or_not_json(self):
+        write_csv(self.dir / "a.csv", days(1, 30, Tags='{"env": 3}') + days(1, 30, ResourceId=VM + "x", Tags="oops"))
+        data = self.read(tag="env")
+        self.assertEqual({r["k"][0] for r in data["views"]["tag"]["rows"]}, {"3", ""})
+        self.assertTrue(any("aren't JSON objects" in line for line in self.lines), self.lines)
+
+    def test_a_tag_nobody_has_is_all_untagged(self):
+        write_csv(self.dir / "a.csv", days(1, 30))
+        view = self.read(tag="team")["views"]["tag"]
+        self.assertEqual((view["tag"], {r["k"][0] for r in view["rows"]}), ("team", {""}))
+
+    def test_one_currency_priced_in_dollars(self):
+        write_csv(self.dir / "a.csv", days(1, 30, 9.0, BillingCurrency="EUR", x_BillingExchangeRate="0.9"))
+        data = self.read()
+        self.assertEqual((data["currency"], data["usd_rate"], data["mixed_currencies"]), ("EUR", 0.9, None))
+
+    def test_two_currencies_without_dollar_figures_are_mixed(self):
+        other = "/subscriptions/bbbbbbbb-1111-2222-3333-444444444444"
+        write_csv(self.dir / "a.csv", days(1, 30, BillingCurrency="EUR", x_PricingCurrency="EUR")
+                  + days(1, 30, BillingCurrency="GBP", x_PricingCurrency="GBP", SubAccountId=other, SubAccountName="uk"))
+        self.assertEqual(self.read()["mixed_currencies"], ["EUR", "GBP"])
+
+    def test_purchases_in_the_current_period(self):
+        write_csv(self.dir / "a.csv", days(1, 30) + [row(30, 20.64, **PURCHASE)])
+        self.assertEqual(self.read()["commitment_purchases"], 20.64)
+        self.assertIsNone(self.read(metric="AmortizedCost")["commitment_purchases"])
+        write_csv(self.dir / "a.csv", days(1, 30) + [row(29, 20.64, **PURCHASE), row(30, -20.64, **PURCHASE)])
+        self.assertEqual(self.read()["commitment_purchases"], 0.0)  # bought and refunded: net
+
+    def test_the_shape_fetch_returns(self):
+        other = "/subscriptions/bbbbbbbb-1111-2222-3333-444444444444"
+        write_csv(self.dir / "a.csv", days(1, 30) + days(1, 30, SubAccountId=other, SubAccountName="acme-dev",
+                                                          ResourceId=VM.replace(GUID, other.rsplit("/", 1)[1]))
+                  + [row(30, 0.5, **UNUSED_PLAN)])
+        data = self.read()
+        self.assertEqual(set(data), FETCH_KEYS | {"source", "commitment_purchases"})
+        self.assertEqual(data["subscriptions"][0], {"id": GUID, "name": "acme-prod", "currency": "USD"})
+        self.assertEqual(data["views"]["subscription"]["names"][""], "(no subscription)")
+        self.assertEqual(data["views"]["resource"]["names"][f"{SUB}/resourcegroups/rg-app"], "rg-app · acme-prod")
+        self.assertEqual((data["source"]["kind"], data["source"]["first"], data["source"]["last"]),
+                         ("focus", "2026-09-01", "2026-09-30"))
+        aztree.summarize(data)
+        aztree.render(data, self.dir / "page.html")
+
+    def test_fewer_than_two_complete_days_stops(self):
+        write_csv(self.dir / "a.csv", days(1, 2))  # the 2nd may be filling in: one complete day
+        with self.assertRaisesRegex(focus.FocusError, "at least 2"):
+            self.read()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -5,13 +5,14 @@
 Only CSV (and CSV.gz) exports: Parquet needs a library aztree doesn't ship.
 """
 import csv
+import datetime as dt
 import gzip
 import json
 import re
 from collections import Counter
 from pathlib import Path
 
-from . import VIEWS, group_key, region_name
+from . import VIEWS, fold, group_key, pick_currency, region_name
 
 MANIFESTS = {"manifest.json", "_manifest.json"}  # Microsoft's docs show both names
 # the columns every row needs; the cost column comes from the metric, and FOCUS 1.2 renamed the meter
@@ -247,3 +248,148 @@ def read_run(run, rows, log=print):
                     rows.add(run, col, row)
                 except ValueError as e:
                     raise FocusError(f"{path}: row {n}: {e}") from None
+
+
+def shift(day, n):
+    return (dt.date.fromisoformat(day) + dt.timedelta(n)).isoformat()
+
+
+def days_between(first, last):
+    a, b = dt.date.fromisoformat(first), dt.date.fromisoformat(last)
+    return [(a + dt.timedelta(i)).isoformat() for i in range((b - a).days + 1)]
+
+
+def own_days(runs, log=print):
+    """Give each day to the newest export run whose manifest covers it: with overwrite off a month has a run a day,
+    a month's first days also rewrite the month before, and two exports can cover the same days. Sets run["days"]:
+    the days a run may add, or None (all of them) for a file without a manifest."""
+    taken, lost = set(), 0
+    for run in sorted((r for r in runs if r["start"]), key=lambda r: (r["submitted_at"], r["end"]), reverse=True):
+        covered = set(days_between(run["start"], run["end"]))
+        lost += len(covered & taken)
+        run["days"] = covered - taken
+        taken |= covered
+    for run in runs:
+        if not run["start"]:
+            run["days"] = None
+    if lost:
+        log(f"  skipped {lost} day{'s' if lost != 1 else ''} of older export runs that a newer run also covers")
+
+
+def usable_last(run, last_read=None):
+    """The last complete day a run holds. An export run can still be filling in its last days, so it stops two days
+    before it was submitted, like last_full_day(). A file without a manifest stops on its last day when that ends a
+    month, else on the day before."""
+    if run["start"]:
+        return min(run["end"], shift(run["submitted"], -2))
+    if not last_read:
+        return None
+    return last_read if shift(last_read, 1).endswith("-01") else shift(last_read, -1)
+
+
+def tag_dict(raw, parsed):
+    """A row's Tags as a dict, parsed once per distinct string. What isn't a JSON object counts as no tags; `parsed`
+    remembers it as None so read() can say how many there were."""
+    if raw not in parsed:
+        try:
+            value = json.loads(raw) if raw else {}
+        except ValueError:
+            value = None
+        parsed[raw] = value if isinstance(value, dict) else None
+    return parsed[raw] or {}
+
+
+def tag_value(raw, key, parsed):
+    low = key.lower()
+    return next((str(v) for k, v in tag_dict(raw, parsed).items() if k.lower() == low), "")
+
+
+def pick_tag(tagged, wanted, parsed):
+    """--tag, or the key on the most distinct resources, like choose_tag(): keys match case-insensitively, hidden-*
+    keys don't count, ties go to the name that sorts first. None when nothing is tagged."""
+    if wanted:
+        return wanted
+    resources, spelling = {}, {}
+    for rid, raw in sorted(tagged):
+        for key in tag_dict(raw, parsed):
+            low = key.lower()
+            if not low.startswith("hidden-"):
+                spelling.setdefault(low, key)
+                resources.setdefault(low, set()).add(rid)
+    if not resources:
+        return None
+    return spelling[min(resources, key=lambda k: (-len(resources[k]), k))]
+
+
+def read(runs, days, metric, tag=None, log=print):
+    """The runs' rows as the data dict fetch() returns: the same views, names and currency rules, with no Advisor,
+    Resource Graph or forecast. `days` shrinks when the files cover less than two periods."""
+    own_days(runs, log)
+    exported = [r for r in runs if r["start"]]
+    loose = [r for r in runs if not r["start"]]
+    end = max((usable_last(r) for r in exported), default=None)
+    if end:  # skip export runs outside the window before opening them: a 13-month download reads what it needs
+        first_needed = shift(end, 1 - 2 * days)
+        exported_open = [r for r in exported if r["days"] and any(first_needed <= d <= end for d in r["days"])]
+    else:
+        exported_open = []
+    opened = loose + exported_open
+    files = [f for r in opened for f in r["files"]]
+    log(f"aztree: reading {len(files)} file{'s' if len(files) != 1 else ''} from {len(opened)} export "
+        f"run{'s' if len(opened) != 1 else ''} ({sum(f.stat().st_size for f in files) / 1e6:.0f} MB)")
+    rows = Rows(metric)
+    for run in opened:
+        read_run(run, rows, log)
+    for run in loose:
+        last = rows.last.get(run["name"])
+        if last and usable_last(run, last) != last:
+            log(f"  {Path(run['name']).name} ends on {last}, which may still be filling in; the days before it count")
+    lasts = [usable_last(r) for r in exported] + [usable_last(r, rows.last.get(r["name"])) for r in loose]
+    lasts = [d for d in lasts if d]
+    if not rows.first or not lasts:
+        raise FocusError("the export files hold no cost rows")
+    end = max(lasts)
+    covered = (dt.date.fromisoformat(end) - dt.date.fromisoformat(rows.first)).days + 1
+    if covered < 2:
+        raise FocusError(f"the files hold {max(covered, 0)} complete day{'s' if covered != 1 else ''}; "
+                         "aztree needs at least 2 to compare two periods")
+    if covered < 2 * days:
+        days = covered // 2
+        log(f"  the files cover {covered} days, so the period is {days} days, compared with the {days} before")
+    dates = [shift(end, i + 1 - 2 * days) for i in range(2 * days)]
+    index = {d: i for i, d in enumerate(dates)}
+
+    def entries(view):
+        return [(key, index[day], cost, usd) for (key, day), (cost, usd) in rows.sums[view].items() if day in index]
+
+    raw = {v: entries(v) for v in VIEWS}
+    parsed = {}
+    chosen = pick_tag(rows.tagged, tag, parsed)
+    if chosen:
+        raw["tag"] = [((tag_value(t, chosen, parsed), service), i, cost, usd)
+                      for (t, service), i, cost, usd in entries("tags")]
+    bad = sum(v is None for v in parsed.values())
+    if bad:
+        log(f"  Tags that aren't JSON objects: {bad} distinct value{'s' if bad != 1 else ''}; their rows count as untagged")
+    found = set().union(*(rows.currencies.get(d, set()) for d in dates)) - {""}
+    currency, usd, mixed, usd_rate = pick_currency(found, raw, log)
+    many = len(rows.sub_names) > 1  # like fetch(): a group's label names its subscription when there are several
+    names = {"service": {}, "region": {}, "subscription": {**rows.sub_names, "": "(no subscription)"},
+             "resource": {g: f"{label} · {rows.sub_names[sub]}" if many and sub in rows.sub_names else label
+                          for g, (label, sub) in rows.groups.items()}}
+    views = {v: {"dims": VIEWS[v], "names": names[v], "rows": fold(raw[v], len(dates), usd)} for v in VIEWS}
+    if chosen:
+        views["tag"] = {"dims": ["TagValue", "ServiceName"], "names": {}, "tag": chosen,
+                        "rows": fold(raw["tag"], len(dates), usd)}
+    purchases = round(sum(rows.purchases.get(d, 0.0) for d in dates[days:]), 2) if metric == "ActualCost" else None
+    return {
+        "days": dates, "split": days, "views": views, "currency": currency,
+        "subscriptions": [{"id": s, "name": rows.sub_names[s], "currency": rows.sub_currencies[s].most_common(1)[0][0]}
+                          for s in sorted(rows.sub_names)],
+        "resource_fallback": [], "advisor": None, "advisor_error": None,
+        "mixed_currencies": mixed, "usd_rate": usd_rate,
+        "forecast": None, "forecast_note": None, "graph": None, "graph_error": None, "demo": False,
+        "source": {"kind": "focus", "files": rows.files, "rows": rows.rows, "first": rows.first,
+                   "last": max(rows.last.values())},
+        "commitment_purchases": purchases,
+    }
