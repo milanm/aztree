@@ -340,5 +340,41 @@ class ReadTest(unittest.TestCase):
             self.read()
 
 
+class FocusCliTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = scratch(self)
+        write_csv(self.dir / "exports" / "a.csv", days(1, 30))
+
+    def main(self, *argv):
+        def no_token(*a, **k):
+            raise AssertionError("--focus must not ask Azure for a token")
+
+        with mock.patch.object(aztree, "get_token", no_token), \
+                mock.patch.dict(os.environ, {"AZTREE_HOME": str(self.dir / "home")}), \
+                redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()):
+            aztree.main(list(argv))
+        return out.getvalue()
+
+    def test_focus_reads_files_without_azure_and_saves_the_run(self):
+        page = self.dir / "page.html"
+        out = self.main("--focus", str(self.dir / "exports"), "--out", str(page), "--no-open")
+        self.assertIn("reading 1 file from 1 export run", out)
+        self.assertIn('"kind":"focus"', page.read_text(encoding="utf-8"))
+        saved = json.loads((self.dir / "home" / "aztree-data.json").read_text(encoding="utf-8"))
+        self.assertEqual((saved["source"]["kind"], saved["metric"]), ("focus", "ActualCost"))
+        again = self.dir / "again.html"
+        self.main("--from", "--out", str(again), "--no-open")
+        self.assertIn('"kind":"focus"', again.read_text(encoding="utf-8"))
+
+    def test_focus_errors_are_one_line(self):
+        with self.assertRaises(SystemExit):
+            self.main("--focus", str(self.dir / "nope"), "--no-open")
+
+    def test_focus_does_not_mix_with_other_sources(self):
+        for extra in (["--demo"], ["--from"], ["--subscription", "acme-prod"]):
+            with self.subTest(extra=extra), self.assertRaises(SystemExit):
+                self.main("--focus", str(self.dir / "exports"), "--no-open", *extra)
+
+
 if __name__ == "__main__":
     unittest.main()

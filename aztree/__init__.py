@@ -1350,6 +1350,9 @@ def main(argv=None):
                      help="subscription to read, repeat for more (default: the Azure CLI's current one)")
     who.add_argument("--all", action="store_true", help="read every enabled subscription you can see")
     who.add_argument("--scope", help="any Cost Management scope, e.g. a billing account (not tested yet)")
+    who.add_argument("--focus", action="append", metavar="PATH",
+                     help="read Cost Management FOCUS export files (CSV) instead of calling Azure: a file or a folder, "
+                          "repeat for more")
     ap.add_argument("--days", type=int, default=30, help="period to show, compared with the period before it (default 30)")
     ap.add_argument("--metric", default="ActualCost", choices=["ActualCost", "AmortizedCost"],
                     help="AmortizedCost spreads reservation and savings plan purchases over their term")
@@ -1368,6 +1371,9 @@ def main(argv=None):
     if not 1 <= args.days <= 180:
         die("--days must be between 1 and 180 (aztree reads two periods, and a query spans a year at most).")
 
+    if args.focus and (args.source or args.demo):
+        die("--focus reads export files, so it can't be combined with --from or --demo.")
+
     if args.source:
         source = Path(args.source)
         if not source.exists():
@@ -1377,16 +1383,23 @@ def main(argv=None):
         data = demo(args.days)
         data.update(generated=dt.datetime.now().strftime("%Y-%m-%d %H:%M"), metric=args.metric)
     else:
-        try:
-            az = Azure(lambda tenant: get_token(tenant=tenant), verbose=args.verbose)
-            cli = shutil.which("az") and not os.environ.get("AZURE_ACCESS_TOKEN")
-            targets = resolve_targets(args, az, cli_list=cli_subscriptions if cli else None)
-            who_ = targets[0]["name"] if len(targets) == 1 else f"{len(targets)} subscriptions"
-            print(f"aztree: reading {who_}, last {args.days} days (+{args.days} before, for comparison)")
-            data = fetch(az, targets, args.days, args.metric, advisor=not args.no_advisor, tag=args.tag,
-                         graph=not args.no_graph)
-        except AzureError as e:
-            die(explain(e))
+        if args.focus:
+            from . import focus  # only --focus needs it
+            try:
+                data = focus.read(focus.find_runs(args.focus), args.days, args.metric, tag=args.tag)
+            except focus.FocusError as e:
+                die(str(e))
+        else:
+            try:
+                az = Azure(lambda tenant: get_token(tenant=tenant), verbose=args.verbose)
+                cli = shutil.which("az") and not os.environ.get("AZURE_ACCESS_TOKEN")
+                targets = resolve_targets(args, az, cli_list=cli_subscriptions if cli else None)
+                who_ = targets[0]["name"] if len(targets) == 1 else f"{len(targets)} subscriptions"
+                print(f"aztree: reading {who_}, last {args.days} days (+{args.days} before, for comparison)")
+                data = fetch(az, targets, args.days, args.metric, advisor=not args.no_advisor, tag=args.tag,
+                             graph=not args.no_graph)
+            except AzureError as e:
+                die(explain(e))
         data.update(generated=dt.datetime.now().strftime("%Y-%m-%d %H:%M"), metric=args.metric)
         saved.parent.mkdir(parents=True, exist_ok=True)
         saved.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
