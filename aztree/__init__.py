@@ -970,6 +970,10 @@ AI_INSTRUCTIONS = (
     "Premium snapshots, unused public IPs, gateways, load balancers and Application Gateways that nothing uses, "
     "disconnected private endpoints, App Service plans with no apps, elastic pools with no databases), with what they "
     "cost in the current period. "
+    "`source`, when present, says the data came from Cost Management FOCUS export files instead of the API, so "
+    "Advisor, the idle checks and the forecast didn't run. `totals.commitment_purchases` is the net cost of "
+    "reservation and savings plan purchases in the current period (ActualCost only). The `(untagged)` row in "
+    "`by_tag` has `how_to_fix` when untagged spend is a tenth of the bill or more. "
     "Please: 1) explain what drives the cost, 2) explain notable changes vs the previous period, "
     "3) suggest concrete savings, each with an estimated monthly saving and how to verify it. "
     "Levers to consider: reservations and savings plans for steady compute and databases; Azure Hybrid Benefit for "
@@ -979,6 +983,10 @@ AI_INSTRUCTIONS = (
     "inside one region."
 )
 TOP_RESOURCES = 20  # per resource group in the export; the rest are summed
+# said on the (untagged) row of by_tag, and on the page, when untagged spend is a tenth of the bill or more
+UNTAGGED_FIX = ("Tag inheritance in Cost Management (EA, MCA and partner Azure plans) copies subscription and "
+                "resource-group tags onto usage from the start of the month, and an Azure Policy that denies resources "
+                "without the tag keeps new ones tagged. Purchases can't be tagged.")
 
 
 def spike(daily, split, floor):
@@ -1275,6 +1283,8 @@ def summarize(data):
     for row in by_tag or []:
         if row["value"] == "":  # flagged, so a real tag value "(untagged)" stays a different row
             row.update(value="(untagged)", untagged=True)
+            if row["share_pct"] >= 10:
+                row["how_to_fix"] = UNTAGGED_FIX
 
     return {
         "tool": "aztree",
@@ -1291,7 +1301,8 @@ def summarize(data):
             "previous": {"start": days[0], "end": days[split - 1], "days": split},
         },
         "totals": {**entry(grand, grand_prev), "daily_avg": money(grand / n), "monthly_pace": money(grand / n * 30.4),
-                   "credits_and_refunds": money(sum(min(x["current"], 0) for x in line_items))},
+                   "credits_and_refunds": money(sum(min(x["current"], 0) for x in line_items)),
+                   "commitment_purchases": data.get("commitment_purchases")},
         "by_service": [{"service": k, **entry(g["cur"], g["prev"])} for k, g in services if keep(g["cur"], g["prev"])],
         "by_subscription": breakdown("subscription", "subscription_id", "service"),
         "by_region": breakdown("region", "region", "service"),
@@ -1308,6 +1319,7 @@ def summarize(data):
         "resource_fallback": data.get("resource_fallback") or [],
         "graph_error": data.get("graph_error"),
         "forecast": data.get("forecast"),
+        "source": data.get("source"),
         "line_items": line_items,
         "daily_totals": [{"date": d, "cost": money(v)} for d, v in zip(days, daily)],
     }

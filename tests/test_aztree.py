@@ -1070,6 +1070,38 @@ class Batch4ExportTest(unittest.TestCase):
             self.assertIn(word, aztree.AI_INSTRUCTIONS)
 
 
+def tagged_data(untagged_per_day):
+    """$9 a day of Storage, split into prod and untagged by the environment tag."""
+    data = make_data([("Storage", "LRS", [9] * 6)])
+    data["views"]["tag"] = {"dims": ["TagValue", "ServiceName"], "names": {}, "tag": "environment",
+                            "rows": [{"k": ["prod", "Storage"], "d": [9 - untagged_per_day] * 6},
+                                     {"k": ["", "Storage"], "d": [untagged_per_day] * 6}]}
+    return data
+
+
+FOCUS_SOURCE = {"kind": "focus", "files": 3, "rows": 120, "first": "2026-09-01", "last": "2026-09-27"}
+
+
+class FocusExportTest(unittest.TestCase):
+    def untagged(self, data):
+        return next(r for r in aztree.summarize(data)["by_tag"] if r.get("untagged"))
+
+    def test_a_tenth_of_the_bill_untagged_says_how_to_fix_it(self):
+        self.assertEqual(self.untagged(tagged_data(1))["how_to_fix"], aztree.UNTAGGED_FIX)  # 11% of the bill
+        self.assertNotIn("how_to_fix", self.untagged(tagged_data(0.5)))  # 5.6%
+        self.assertIn("Tag inheritance", aztree.UNTAGGED_FIX)
+
+    def test_source_and_purchases_are_passed_on(self):
+        s = aztree.summarize(make_data([("Storage", "LRS", [1] * 6)], source=FOCUS_SOURCE, commitment_purchases=20.64))
+        self.assertEqual((s["source"], s["totals"]["commitment_purchases"]), (FOCUS_SOURCE, 20.64))
+        old = aztree.summarize(BASIC)
+        self.assertEqual((old["source"], old["totals"]["commitment_purchases"]), (None, None))
+
+    def test_instructions_explain_them(self):
+        for word in ("`source`", "commitment_purchases", "how_to_fix"):
+            self.assertIn(word, aztree.AI_INSTRUCTIONS)
+
+
 TEMPLATE = (REPO / "aztree" / "viewer.html").read_text(encoding="utf-8")
 
 # Runs the viewer's script in Node against a bare-bones DOM: enough to prove each view draws boxes
@@ -2726,6 +2758,30 @@ class ExplainTest(unittest.TestCase):
 
     def test_401_mentions_login(self):
         self.assertIn("az login", aztree.explain(aztree.AzureError(401, "expired")))
+
+
+class FocusPageTest(unittest.TestCase):
+    render = ViewerTest.render
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_a_focus_run_says_where_its_data_came_from(self):
+        page = ViewerTest.run_page(self, make_data([("Storage", "LRS", [1] * 6)], source=FOCUS_SOURCE), "service")
+        self.assertIn("from FOCUS export files", page["meta"])
+        self.assertIn("3 files, 2026-09-01 to 2026-09-27", page["meta"])
+        plain = ViewerTest.run_page(self, make_data([("Storage", "LRS", [1] * 6)]), "service")
+        self.assertNotIn("FOCUS", plain["meta"])
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_purchases_get_a_note(self):
+        page = ViewerTest.run_page(self, make_data([("Storage", "LRS", [100] * 6)], commitment_purchases=120.0), "service")
+        self.assertIn("reservation and savings plan purchases $120", page["sub"])
+        plain = ViewerTest.run_page(self, make_data([("Storage", "LRS", [100] * 6)]), "service")
+        self.assertNotIn("purchases", plain["sub"])
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_the_tag_view_says_how_to_fix_a_big_untagged_share(self):
+        self.assertIn("how to fix", ViewerTest.run_page(self, tagged_data(1), "tag")["sub"])
+        self.assertNotIn("how to fix", ViewerTest.run_page(self, tagged_data(0.5), "tag")["sub"])
 
 
 if __name__ == "__main__":

@@ -307,6 +307,8 @@ const CREDITS = whole.credits; // meters with a negative total: the export's cre
 // spend on resources without the tag, for the tag view's header (the "(untagged)" box before any filter)
 const UNTAGGED = (DATA.views.tag?.rows || []).filter(r => r.k[0] === "")
   .reduce((s, r) => s + r.d.slice(SPLIT).reduce((a, b) => a + b, 0), 0);
+// how to shrink the untagged box: the export adds it when untagged spend is a tenth of the bill or more
+const FIX = (DATA.export?.by_tag || []).find(r => r.untagged)?.how_to_fix;
 
 // ---------- squarified treemap layout
 function squarify(nodes, x, y, w, h) {
@@ -460,9 +462,11 @@ function renderChrome(base) {
     ? `${hits.length} ${esc(hits.length === 1 ? DIM[B].one : DIM[B].many)} · ${money(found)} · ${pct(grand > 0 ? found / grand : 0)} of bill`
     : "no match"}</span>`;
   const untagged = state.view === "tag" && !narrowed()
-    ? `<span title="spend on resources without the ${esc(TAG)} tag">untagged ${money(UNTAGGED)} (${pct(grand > 0 ? UNTAGGED / grand : 0)} of bill)</span>` : "";
+    ? `<span title="spend on resources without the ${esc(TAG)} tag">untagged ${money(UNTAGGED)} (${pct(grand > 0 ? UNTAGGED / grand : 0)} of bill)${FIX ? ` · <abbr title="${esc(FIX)}">how to fix</abbr>` : ""}</span>` : "";
+  const purchases = DATA.commitment_purchases >= 0.01
+    ? `<span title="--metric AmortizedCost spreads them over their term">reservation and savings plan purchases ${money(DATA.commitment_purchases)}, booked the day they were bought</span>` : "";
   $("#sub").innerHTML = `<span><b>${money(root.cur)}</b> · ${period()}</span><span>${root.children.length} ${esc(DIM[A].many)} · ${leaves} ${esc(DIM[B].many)}</span>
-    ${MIXED}${fallback}${untagged}${creditNote(root, "span")}${readout}<div class="legend">${legend}</div>`;
+    ${MIXED}${purchases}${fallback}${untagged}${creditNote(root, "span")}${readout}<div class="legend">${legend}</div>`;
 }
 
 // a subscription with too many resources gets one total per resource and period, so no daily chart in that view
@@ -823,6 +827,7 @@ map.addEventListener("mouseleave", () => (tip.style.display = "none"));
 const subs = DATA.subscriptions || [];
 $("#meta").innerHTML = (DATA.demo ? `<span class="badge">demo data</span> ` : "") +
   `${esc(DATA.metric || "ActualCost")} · ${esc(subs.length === 1 ? subs[0].name : subs.length + " subscriptions")} · read ${esc(DATA.generated || "")}` +
+  (DATA.source?.kind === "focus" ? ` · <span title="${esc(`${DATA.source.files} files, ${DATA.source.first} to ${DATA.source.last}`)}">from FOCUS export files</span>` : "") +
   ` · <a href="https://github.com/petricbranko/awstree" target="_blank" rel="noopener">a port of awstree</a>`;
 let raf;
 render();
