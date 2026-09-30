@@ -157,7 +157,7 @@ Advisor, the idle checks and the forecast need Azure, so they don't run on files
 
 In the Azure portal, open **Cost Management → Cost analysis**. Choose the cost type you ran with (**Actual cost** by default), daily granularity and the dates in aztree's header.
 
-The totals should match to the cent. Azure can still add a little to the last day after aztree reads it, so compare soon after a run.
+The totals should match to within a few cents. aztree leaves out the smallest leftovers, under half a cent in each group, and on a big bill they can add up to a few cents. Azure can still add a little to the last day after aztree reads it, so compare soon after a run.
 
 ## Privacy
 
