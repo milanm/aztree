@@ -2775,6 +2775,8 @@ class FocusPageTest(unittest.TestCase):
         self.assertIn("3 files, 2026-09-01 to 2026-09-27", page["meta"])
         plain = ViewerTest.run_page(self, make_data([("Storage", "LRS", [1] * 6)]), "service")
         self.assertNotIn("FOCUS", plain["meta"])
+        one = ViewerTest.run_page(self, make_data([("Storage", "LRS", [1] * 6)], source={**FOCUS_SOURCE, "files": 1}), "service")
+        self.assertIn("1 file, 2026-09-01", one["meta"])
 
     @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
     def test_purchases_get_a_note(self):

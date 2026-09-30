@@ -258,6 +258,13 @@ class ReadRunTest(unittest.TestCase):
         with self.assertRaisesRegex(focus.FocusError, "row 2: ChargePeriodStart isn't a date"):
             self.read([row(1, ChargePeriodStart="2026-02-30T00:00Z")])
 
+    def test_a_semicolon_csv_says_how_to_save_it(self):  # Excel's "CSV" in locales with a decimal comma
+        path = self.dir / "excel.csv"
+        path.write_text(";".join(HEADER) + "\n", encoding="utf-8")
+        (run,) = focus.find_runs([str(path)], log=self.lines.append)
+        with self.assertRaisesRegex(focus.FocusError, "semicolons.*CSV UTF-8"):
+            focus.read_run(run, focus.Rows("ActualCost"), log=self.lines.append)
+
 
 FETCH_KEYS = {"days", "split", "views", "currency", "subscriptions", "resource_fallback", "advisor", "advisor_error",
               "mixed_currencies", "usd_rate", "forecast", "forecast_note", "graph", "graph_error", "demo"}
@@ -325,6 +332,28 @@ class ReadTest(unittest.TestCase):
         data = self.read(tag="env")
         self.assertEqual({r["k"][0] for r in data["views"]["tag"]["rows"]}, {"3", ""})
         self.assertTrue(any("aren't JSON objects" in line for line in self.lines), self.lines)
+
+    def test_tag_values_read_as_json_writes_them(self):
+        write_csv(self.dir / "a.csv", days(1, 30, Tags='{"env": true}') + days(1, 30, ResourceId=VM + "x", Tags='{"env": null}'))
+        self.assertEqual({r["k"][0] for r in self.read(tag="env")["views"]["tag"]["rows"]}, {"true", ""})
+
+    def test_rows_with_tags_that_are_not_json_are_counted(self):
+        write_csv(self.dir / "a.csv", days(1, 30, Tags="oops") + days(1, 30, ResourceId=VM + "x", Tags="also oops"))
+        self.read(tag="env")
+        self.assertTrue(any("60 rows have Tags that aren't JSON objects" in line for line in self.lines), self.lines)
+
+    def test_a_run_missing_a_file_gives_way_to_a_complete_one(self):
+        write_run(self.dir / "old", days(1, 19, 1.0), "2026-09-01", "2026-09-19", "2026-09-19T05:00:00Z")
+        write_run(self.dir / "new", days(1, 20, 5.0), "2026-09-01", "2026-09-20", "2026-09-20T05:00:00Z",
+                  listed=("part_0_0001.csv", "part_1_0001.csv"))
+        data = self.read()
+        self.assertEqual(data["days"][-1], "2026-09-18")
+        self.assertEqual(self.total(data), 18.0)  # the older, complete run's days
+
+    def test_submitted_times_compare_as_times(self):  # "…05:00:00.5Z" is later than "…05:00:00Z", not earlier
+        write_run(self.dir / "a", days(1, 20, 1.0), "2026-09-01", "2026-09-20", "2026-09-20T05:00:00Z")
+        write_run(self.dir / "b", days(1, 20, 2.0), "2026-09-01", "2026-09-20", "2026-09-20T05:00:00.5Z")
+        self.assertEqual(self.total(self.read()), 36.0)
 
     def test_a_tag_nobody_has_is_all_untagged(self):
         write_csv(self.dir / "a.csv", days(1, 30))

@@ -827,7 +827,7 @@ map.addEventListener("mouseleave", () => (tip.style.display = "none"));
 const subs = DATA.subscriptions || [];
 $("#meta").innerHTML = (DATA.demo ? `<span class="badge">demo data</span> ` : "") +
   `${esc(DATA.metric || "ActualCost")} · ${esc(subs.length === 1 ? subs[0].name : subs.length + " subscriptions")} · read ${esc(DATA.generated || "")}` +
-  (DATA.source?.kind === "focus" ? ` · <span title="${esc(`${DATA.source.files} files, ${DATA.source.first} to ${DATA.source.last}`)}">from FOCUS export files</span>` : "");
+  (DATA.source?.kind === "focus" ? ` · <span title="${esc(`${DATA.source.files} file${DATA.source.files === 1 ? "" : "s"}, ${DATA.source.first} to ${DATA.source.last}`)}">from FOCUS export files</span>` : "");
 let raf;
 render();
 remember(false);

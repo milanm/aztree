@@ -81,7 +81,7 @@ def manifest_run(path, log):
     info = obj(manifest.get("runInfo"))
     run = {"name": str(path.parent), "files": files, "start": day_of(info.get("startDate")),
            "end": day_of(info.get("endDate")), "submitted": day_of(info.get("submittedTime")),
-           "submitted_at": str(info.get("submittedTime") or ""), "named": False}
+           "submitted_at": str(info.get("submittedTime") or ""), "named": False, "incomplete": bool(missing)}
     if not (run["start"] and run["end"] and run["submitted"]):  # a manifest aztree doesn't understand: read it like a file
         run.update(start=None, end=None, submitted=None, submitted_at="")
     return (run if files else None), [f for f in here if is_parquet(f)]
@@ -198,6 +198,7 @@ class Rows:
         self.sub_names, self.sub_currencies = {}, {}  # subscription guid -> its name; -> Counter of its currencies
         self.groups = {}  # resource group key -> (label, subscription guid)
         self.tagged = set()  # (resource id, raw Tags): the tag view's key is chosen from these
+        self.tag_rows = Counter()  # raw Tags -> rows, to say how many had Tags that aren't JSON
         self.purchases = {}  # day -> net cost of reservation and savings plan purchases (ActualCost only)
         self.last = {}  # run name -> the last day read from it
         self.seen = {}  # run name -> the days read from it
@@ -230,6 +231,7 @@ class Rows:
         self.groups.setdefault(group, (rg or "(no resource group)", sub))
         if rid and tags:
             self.tagged.add((rid, tags))
+        self.tag_rows[tags] += 1
         region = region_name(row[col["RegionName"]] or row[col["RegionId"]])
         for view, key in (("service", (service, meter)), ("subscription", (sub, service)), ("region", (region, service)),
                           ("resource", (group, rid or "(no resource)")), ("tags", (tags, service))):
@@ -251,6 +253,8 @@ def read_run(run, rows, log=print):
                 col, missing = columns(header, rows.metric)
                 if missing:
                     why = f"{path}: {NOT_FOCUS} (no {', '.join(missing)})"
+                    if len(header) == 1 and ";" in header[0]:  # Excel's "CSV" where the decimal mark is a comma
+                        why = f"{path} uses semicolons: in Excel, save it as \"CSV UTF-8 (Comma delimited)\""
                     if run["named"]:
                         raise FocusError(why)
                     log(f"  skipped {why}")
@@ -280,12 +284,21 @@ def days_between(first, last):
     return [(a + dt.timedelta(i)).isoformat() for i in range((b - a).days + 1)]
 
 
+def submitted_key(text):
+    """'2025-03-21T21:04:06.5234447Z' in a form that sorts as a time: '...06Z' comes before '...06.5Z'."""
+    m = re.match(r"(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.(\d+))?", text)
+    return (m.group(1), m.group(2), (m.group(3) or "").ljust(9, "0")) if m else (text, "", "")
+
+
 def own_days(runs, log=print):
     """Give each day to the newest export run whose manifest covers it: with overwrite off a month has a run a day,
     a month's first days also rewrite the month before, and two exports can cover the same days. Sets run["days"]:
     the days a run may add, or None (all of them) for a file without a manifest."""
     taken, lost = set(), 0
-    for run in sorted((r for r in runs if r["start"]), key=lambda r: (r["submitted_at"], r["end"]), reverse=True):
+    # a run missing some of its files only gets the days no complete run covers
+    newest = sorted((r for r in runs if r["start"]), reverse=True,
+                    key=lambda r: (not r.get("incomplete"), submitted_key(r["submitted_at"]), r["end"]))
+    for run in newest:
         covered = set(days_between(run["start"], run["end"]))
         lost += len(covered & taken)
         run["days"] = covered - taken
@@ -322,7 +335,10 @@ def tag_dict(raw, parsed):
 
 def tag_value(raw, key, parsed):
     low = key.lower()
-    return next((str(v) for k, v in tag_dict(raw, parsed).items() if k.lower() == low), "")
+    for k, v in tag_dict(raw, parsed).items():
+        if k.lower() == low:  # as JSON writes it: true, not Python's True; null is no value
+            return "" if v is None else v if isinstance(v, str) else json.dumps(v)
+    return ""
 
 
 def pick_tag(tagged, wanted, parsed):
@@ -389,9 +405,9 @@ def read(runs, days, metric, tag=None, log=print):
     if chosen:
         raw["tag"] = [((tag_value(t, chosen, parsed), service), i, cost, usd)
                       for (t, service), i, cost, usd in entries("tags")]
-    bad = sum(v is None for v in parsed.values())
+    bad = sum(rows.tag_rows[t] for t, v in parsed.items() if v is None)
     if bad:
-        log(f"  Tags that aren't JSON objects: {bad} distinct value{'s' if bad != 1 else ''}; their rows count as untagged")
+        log(f"  {bad} row{'s have' if bad != 1 else ' has'} Tags that aren't JSON objects; they count as untagged")
     repeated = sum(1 for n in Counter(d for r in opened for d in rows.seen.get(r["name"], ())).values() if n > 1)
     if repeated:  # export runs never share a day, so a file without a manifest is in each of these
         log(f"  {repeated} day{'s appear' if repeated != 1 else ' appears'} in more than one file without a manifest; "
