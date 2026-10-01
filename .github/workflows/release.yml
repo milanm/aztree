@@ -64,6 +64,12 @@ jobs:
             if [ -e "$p" ]; then sudo mv "$p" "$p.hidden"; echo "hid $p"; fi
           done
       - run: python packaging/build_native.py --rid ${{ matrix.rid }}
+      - name: Put the certificates back, which the runner itself needs to talk to GitHub
+        if: runner.os != 'Windows'
+        run: |
+          for p in $(python -c "import ssl; p = ssl.get_default_verify_paths(); print(p.openssl_cafile, p.openssl_capath)"); do
+            if [ -e "$p.hidden" ]; then sudo mv "$p.hidden" "$p"; fi
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.rid }}
