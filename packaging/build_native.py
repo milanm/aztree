@@ -1,4 +1,4 @@
-"""Freeze aztree into one executable for this platform with PyInstaller, then check it works.
+"""Freeze aztree into one executable for this platform with PyInstaller, then check it works (one check calls Azure).
 
     python packaging/build_native.py [--rid win-x64]
 
@@ -52,6 +52,13 @@ def main():
                        env={**os.environ, "AZTREE_HOME": tmp})
         if '"demo":true' not in page.read_text(encoding="utf-8"):
             sys.exit("build_native: the demo page has no demo data")
+        # and must trust Azure's certificate: an OpenSSL that trusts nothing fails every call (issue #2). A made-up
+        # token and subscription get an HTTP error from Azure, which only comes back over verified TLS.
+        said = subprocess.run([str(built), "--scope", "/subscriptions/00000000-0000-0000-0000-000000000000",
+                               "--days", "1", "--no-advisor", "--no-graph", "--no-open"], capture_output=True, text=True,
+                              env={**os.environ, "AZTREE_HOME": tmp, "AZURE_ACCESS_TOKEN": "not-a-token"})
+        if "Azure error: HTTP 4" not in said.stderr:
+            sys.exit(f"build_native: Azure didn't answer over HTTPS:\n{said.stdout}{said.stderr}")
 
     target = OUT / f"aztree-{rid}{exe}"
     shutil.copy2(built, target)

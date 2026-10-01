@@ -10,11 +10,13 @@ __version__ = "0.8.3"
 
 import argparse
 import datetime as dt
+import functools
 import json
 import os
 import random
 import re
 import shutil
+import ssl
 import statistics
 import subprocess
 import sys
@@ -150,10 +152,40 @@ class TooManyPages(Exception):
     pass
 
 
+# Where operating systems keep their CA bundle (Go reads the same list): Debian and Ubuntu, Fedora and RHEL,
+# RHEL 7 and CentOS, openSUSE, then macOS, Alpine and the BSDs
+SYSTEM_CA_FILES = ["/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt",
+                   "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", "/etc/ssl/ca-bundle.pem", "/etc/ssl/cert.pem"]
+
+
+def ca_files(env=os.environ, paths=None, exists=os.path.isfile, windows=sys.platform == "win32"):
+    """CA bundles to trust besides Python's own. A frozen executable's OpenSSL looks where its build machine kept
+    certificates (python.org's framework folder on macOS, /usr/lib/ssl on Linux), which most machines don't have: then
+    the system's bundle stands in. Windows reads its certificate store. REQUESTS_CA_BUNDLE is what the Azure CLI reads
+    behind a proxy that inspects HTTPS; SSL_CERT_FILE, OpenSSL's own, needs nothing from here."""
+    paths = paths or ssl.get_default_verify_paths()
+    found = []
+    if not windows and not paths.cafile and not paths.capath:
+        found += [f for f in SYSTEM_CA_FILES if exists(f)][:1]
+    bundle = env.get("REQUESTS_CA_BUNDLE")
+    if bundle and exists(bundle):
+        found.append(bundle)
+    return found
+
+
+@functools.lru_cache(maxsize=None)
+def tls_context():
+    """One context for every request: Python's trusted certificates plus ca_files()."""
+    ctx = ssl.create_default_context()
+    for f in ca_files():
+        ctx.load_verify_locations(cafile=f)
+    return ctx
+
+
 def http_send(method, url, data, headers):
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=120) as r:
+        with urllib.request.urlopen(req, timeout=120, context=tls_context()) as r:
             return r.status, dict(r.headers), r.read()
     except urllib.error.HTTPError as e:
         return e.code, dict(e.headers), e.read()
@@ -189,6 +221,8 @@ class Azure:
                 status, resp_headers, raw = self.send(method, url, data, headers)
             except OSError as e:  # URLError, timeouts, resets: the network, not Azure, said no
                 reason = getattr(e, "reason", e)
+                if isinstance(reason, ssl.SSLCertVerificationError):  # the same certificate on every try
+                    raise AzureError(0, f"untrusted certificate: {reason}") from e
                 if attempt == MAX_TRIES:
                     raise AzureError(0, f"network error: {reason}") from e
                 self.log(f"    network error ({reason}); retrying in {5 * attempt}s ...")
@@ -226,7 +260,11 @@ def explain(e):
         hints.append("You need the Cost Management Reader (or Reader) role on the subscription or scope.")
     if e.status == 429:
         hints.append("Cost Management kept throttling. Wait a minute and try again, or read fewer subscriptions.")
-    if e.status == 0:
+    if e.status == 0 and "untrusted certificate" in str(e):
+        hints.append("aztree found no CA certificate that vouches for Azure. Behind a proxy that inspects HTTPS, set "
+                     "SSL_CERT_FILE (or REQUESTS_CA_BUNDLE, as for the Azure CLI) to a PEM file with your company's "
+                     "root certificate.")
+    elif e.status == 0:
         hints.append("Check your network connection and try again.")
     return f"Azure error: {e}" + ("\n  -> " + "\n  -> ".join(hints) if hints else "")
 

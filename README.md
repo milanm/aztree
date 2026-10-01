@@ -81,6 +81,7 @@ On the map:
 - The **Cost Management Reader** role (or Reader) on each subscription. Advisor tips, the Resource Graph checks and the automatic tag choice need Reader. Without it you still get the page, and `--tag KEY` still gives you the tag view.
 - Tested on a CSP subscription, where Azure shows retail prices without your partner's discounts. It also shows reserved usage as $0, even with `--metric AmortizedCost`, so the totals won't match your partner's invoice. Pay-as-you-go and Visual Studio subscriptions use the same API.
 - EA and MCA billing scopes should work through `--scope`, but nobody has tried yet. At such a scope the subscription view shows the whole scope as one box, and Advisor is skipped.
+- Behind a proxy that inspects HTTPS, aztree needs your company's root certificate, like the Azure CLI does. Set `SSL_CERT_FILE` (or `REQUESTS_CA_BUNDLE`, which the CLI reads) to a PEM file that holds it.
 
 **Cost:** Cost Management queries are free, but Azure limits how often you can call them, per subscription and per tenant. A run makes about 10–14 requests per subscription and may wait 30–60 seconds when Azure asks it to.
 

@@ -2774,6 +2774,60 @@ class TenantLinkTest(unittest.TestCase):
         self.assertIn(f'<a href="{aztree.PORTAL}/#@t-one/resource{RG}/providers/microsoft.compute/disks/d1"', page["side"])
 
 
+class TlsTest(unittest.TestCase):
+    """Issue #2: the macOS executable's OpenSSL looks for certificates only where python.org's installer puts them, so on
+    most Macs it trusted nothing and every call failed with CERTIFICATE_VERIFY_FAILED."""
+    FROZEN_MAC = aztree.ssl.DefaultVerifyPaths(None, None, "SSL_CERT_FILE", "/Library/Frameworks/Python.framework/Versions/"
+                                               "3.13/etc/openssl/cert.pem", "SSL_CERT_DIR", "/Library/Frameworks/x/certs")
+    UBUNTU = FROZEN_MAC._replace(cafile="/usr/lib/ssl/cert.pem")
+
+    def files(self, paths, *present, env=None, windows=False):
+        return aztree.ca_files(env or {}, paths, set(present).__contains__, windows)
+
+    def test_a_python_that_trusts_nothing_reads_the_systems_bundle(self):
+        self.assertEqual(self.files(self.FROZEN_MAC, "/etc/ssl/cert.pem"), ["/etc/ssl/cert.pem"])  # macOS
+        self.assertEqual(self.files(self.FROZEN_MAC, "/etc/pki/tls/certs/ca-bundle.crt"),  # the Linux build on Fedora
+                         ["/etc/pki/tls/certs/ca-bundle.crt"])
+
+    def test_a_python_with_its_own_certificates_keeps_them(self):
+        self.assertEqual(self.files(self.UBUNTU, "/etc/ssl/cert.pem"), [])
+
+    def test_windows_reads_its_own_certificate_store(self):
+        self.assertEqual(self.files(self.FROZEN_MAC, "/etc/ssl/cert.pem", windows=True), [])
+
+    def test_the_azure_clis_bundle_setting_counts_too(self):  # what a proxy that inspects HTTPS needs
+        env = {"REQUESTS_CA_BUNDLE": "/corp/root.pem"}
+        self.assertEqual(self.files(self.UBUNTU, "/corp/root.pem", env=env), ["/corp/root.pem"])
+        self.assertEqual(self.files(self.UBUNTU, env=env), [])  # a file that isn't there is the CLI's problem
+
+    def test_requests_verify_with_that_context(self):
+        seen = {}
+
+        def urlopen(req, timeout, context):
+            seen["context"] = context
+            raise aztree.urllib.error.HTTPError(req.full_url, 401, "no", {}, io.BytesIO(b"{}"))
+
+        with mock.patch.object(aztree.urllib.request, "urlopen", urlopen):
+            aztree.http_send("GET", "https://management.azure.com/", None, {})
+        self.assertIs(seen["context"], aztree.tls_context())
+        self.assertEqual(seen["context"].verify_mode, aztree.ssl.CERT_REQUIRED)
+
+    def test_an_untrusted_certificate_is_not_retried_and_says_what_to_do(self):
+        waits = []
+
+        def send(method, url, data, headers):
+            raise aztree.urllib.error.URLError(aztree.ssl.SSLCertVerificationError(
+                1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate"))
+
+        with self.assertRaises(aztree.AzureError) as ctx:
+            client(send, sleep=waits.append).call("GET", "/subscriptions")
+        self.assertEqual(waits, [])  # retrying can't fix a certificate
+        said = aztree.explain(ctx.exception)
+        self.assertIn("unable to get local issuer certificate", said)
+        self.assertIn("SSL_CERT_FILE", said)
+        self.assertNotIn("Check your network", said)
+
+
 class ExplainTest(unittest.TestCase):
     def test_bad_response_is_not_blamed_on_the_network(self):
         send = FakeSend(page(["UsageDate", "ServiceName", "Meter"], [[20260925, "Storage", "LRS"]]))
