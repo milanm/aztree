@@ -459,6 +459,10 @@ class FocusCliTest(unittest.TestCase):
         self.main("--from", "--out", str(again), "--no-open")
         self.assertIn('"kind":"focus"', again.read_text(encoding="utf-8"))
 
+    def test_focus_keeps_a_dated_copy_too(self):
+        self.main("--focus", str(self.dir / "exports"), "--out", str(self.dir / "page.html"), "--no-open")
+        self.assertEqual(len(list((self.dir / "home" / "history").glob("aztree-*.json"))), 1)
+
     def test_focus_errors_are_one_line(self):
         with self.assertRaises(SystemExit):
             self.main("--focus", str(self.dir / "nope"), "--no-open")

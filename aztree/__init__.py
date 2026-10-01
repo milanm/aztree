@@ -43,6 +43,8 @@ def template():
 ARM = "https://management.azure.com"
 PORTAL = "https://portal.azure.com"
 API_VERSION = "2025-03-01"  # Microsoft.CostManagement/query
+SCHEMA = 1  # the saved data's and the export's format: raise it when either changes in a way readers would notice
+HISTORY_KEPT = 12  # dated copies of runs kept in ~/.aztree/history/
 MAX_TRIES = 8  # per request, when Cost Management throttles us
 MAX_RESOURCE_PAGES = 10  # past this, the resource view reads one total per resource and period instead of daily rows
 # What to sum, in order of preference. Some scopes reject USD columns, and older offers only know PreTaxCost.
@@ -989,7 +991,8 @@ def advisor_rec(p, target):
 # ---------------------------------------------------------------- AI export
 
 AI_INSTRUCTIONS = (
-    "This is an Azure cost breakdown exported by aztree. Amounts are in `currency`, for the cost type in `metric` "
+    "This is an Azure cost breakdown exported by aztree; `schema` is the version of its format. "
+    "Amounts are in `currency`, for the cost type in `metric` "
     "(ActualCost books reservation and savings plan purchases on the day they were bought; AmortizedCost spreads them "
     "over the term). When `currency` is \"mixed\", the subscriptions bill in the currencies listed in `currencies` and "
     "Azure didn't convert them, so totals add different currencies: compare amounts within one subscription only. "
@@ -1336,6 +1339,7 @@ def summarize(data):
 
     return {
         "tool": "aztree",
+        "schema": SCHEMA,
         "instructions_for_ai": AI_INSTRUCTIONS,
         "generated": data.get("generated"),
         "metric": data.get("metric", "ActualCost"),
@@ -1386,6 +1390,15 @@ def render(data, out):
     # < keeps names like "</script>" or "<!--" from ending the script block early
     blob = json.dumps(page, separators=(",", ":"), ensure_ascii=False).replace("<", "\\u003c")
     out.write_text(html.replace("__AZTREE_DATA__", blob), encoding="utf-8")
+
+
+def keep_snapshot(data, folder, stamp, kept=HISTORY_KEPT):
+    """A dated copy of a run's data, and only the newest `kept` of them. Costs can be read again later; what Resource
+    Graph and Advisor found that day can't, so a later version can say what changed since."""
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"aztree-{stamp:%Y-%m-%d_%H%M%S}.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    for old in sorted(folder.glob("aztree-????-??-??_??????.json"))[:-kept]:
+        old.unlink()
 
 
 def resolve_targets(args, az, cli_list=None):
@@ -1460,9 +1473,11 @@ def main(argv=None):
                              graph=not args.no_graph)
             except AzureError as e:
                 die(explain(e))
-        data.update(generated=dt.datetime.now().strftime("%Y-%m-%d %H:%M"), metric=args.metric)
+        now = dt.datetime.now()
+        data.update(generated=now.strftime("%Y-%m-%d %H:%M"), metric=args.metric, schema=SCHEMA)
         saved.parent.mkdir(parents=True, exist_ok=True)
         saved.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        keep_snapshot(data, saved.parent / "history", now)
         print(f"aztree: saved the data to {saved} (reopen it with: aztree --from)")
 
     if args.export:

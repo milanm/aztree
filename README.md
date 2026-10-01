@@ -91,6 +91,8 @@ aztree saves the data in `~/.aztree/`, so reopening the page is instant:
 aztree --from
 ```
 
+Each run also keeps a dated copy in `~/.aztree/history/`, the last 12, so a later version can say what changed since. Like the saved data, the copies hold your costs and subscription IDs. Delete the folder whenever you like.
+
 ## Ask an AI about your bill
 
 ```bash

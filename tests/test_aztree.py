@@ -1474,6 +1474,55 @@ class Batch4CliTest(unittest.TestCase):
         self.assertEqual((seen["tag"], seen["graph"]), (None, True))
 
 
+class SnapshotTest(unittest.TestCase):
+    """Every read from Azure or FOCUS files keeps a dated copy: costs can be read again later, what Resource Graph and
+    Advisor found that day can't."""
+
+    def setUp(self):
+        self.home = scratch_dir(self)
+
+    def run_main(self, *argv):
+        from contextlib import redirect_stdout
+        with mock.patch.object(aztree, "fetch", lambda *a, **k: make_data([("Storage", "LRS", [1] * 6)])), \
+                mock.patch.object(aztree, "resolve_targets", lambda *a, **k: [aztree.subscription_target(PROD)]), \
+                mock.patch.dict(os.environ, {"AZTREE_HOME": str(self.home)}), redirect_stdout(io.StringIO()):
+            aztree.main([*argv, "--no-open"])
+
+    def snapshots(self):
+        return sorted((self.home / "history").glob("*")) if (self.home / "history").exists() else []
+
+    def test_a_read_from_azure_keeps_a_dated_copy(self):
+        self.run_main()
+        (copy,) = self.snapshots()
+        self.assertRegex(copy.name, r"^aztree-\d{4}-\d{2}-\d{2}_\d{6}\.json$")
+        self.assertEqual(copy.read_text(encoding="utf-8"), (self.home / "aztree-data.json").read_text(encoding="utf-8"))
+
+    def test_the_demo_and_saved_data_keep_no_copy(self):
+        self.run_main("--demo")
+        self.assertEqual(self.snapshots(), [])
+        saved = self.home / "old.json"
+        saved.write_text(json.dumps(BASIC), encoding="utf-8")
+        self.run_main("--from", str(saved))
+        self.assertEqual(self.snapshots(), [])
+
+    def test_only_the_newest_twelve_are_kept(self):
+        folder = self.home / "history"
+        folder.mkdir()
+        (folder / "notes.txt").write_text("mine", encoding="utf-8")  # not aztree's: left alone
+        for day in range(1, 14):
+            aztree.keep_snapshot(BASIC, folder, aztree.dt.datetime(2026, 9, day, 8, 0, 0))
+        kept = sorted(p.name for p in folder.glob("aztree-*.json"))
+        self.assertEqual((len(kept), kept[0], kept[-1]), (12, "aztree-2026-09-02_080000.json", "aztree-2026-09-13_080000.json"))
+        self.assertTrue((folder / "notes.txt").exists())
+
+    def test_saved_data_and_the_export_name_their_schema(self):
+        self.run_main()
+        saved = json.loads((self.home / "aztree-data.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["schema"], aztree.SCHEMA)
+        self.assertEqual(aztree.summarize(BASIC)["schema"], aztree.SCHEMA)  # the export's format, whatever the data's age
+        self.assertIn("`schema`", aztree.AI_INSTRUCTIONS)
+
+
 class ReviewFixesTest(unittest.TestCase):
     """Findings from the final review, each reproduced before it was fixed."""
 
