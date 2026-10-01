@@ -1098,7 +1098,7 @@ class FocusExportTest(unittest.TestCase):
         self.assertEqual((old["source"], old["totals"]["commitment_purchases"]), (None, None))
 
     def test_instructions_explain_them(self):
-        for word in ("`source`", "commitment_purchases", "how_to_fix"):
+        for word in ("`source`", "commitment_purchases", "how_to_fix", "`source.warnings`"):
             self.assertIn(word, aztree.AI_INSTRUCTIONS)
 
 
@@ -1265,6 +1265,16 @@ class ViewerTest(unittest.TestCase):
     def test_advisor_without_access_says_so(self):
         page = self.run_page(make_data([("Storage", "LRS", [1] * 6)], advisor=[], advisor_error="HTTP 403: denied"), "service")
         self.assertIn("needs Reader", page["side"])
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_advisor_read_in_some_subscriptions_says_the_rest_are_missing(self):
+        data = make_data([("Storage", "LRS", [1] * 6)], advisor=[tip("Consider virtual machine reserved instance")],
+                         advisor_error="HTTP 403")
+        side = self.run_page(data, "service")["side"]
+        self.assertIn("1 cost tip", side)
+        self.assertIn("Advisor needs Reader, and wasn't read where it's missing.", side)
+        data["advisor_error"] = "HTTP 500"
+        self.assertIn("Advisor couldn't be read everywhere (HTTP 500).", self.run_page(data, "service")["side"])
 
 
 class MainTest(unittest.TestCase):
@@ -1984,8 +1994,15 @@ class DevTestTest(unittest.TestCase):
         data["subscriptions"] = [{"id": "aaaa-1", "name": "acme-staging", "currency": "USD"}]
         self.assertEqual(len(self.devtest(data)), 2)  # both groups sit in the staging subscription
 
-    def test_not_judged_from_period_totals(self):
-        self.assertEqual(self.devtest(self.data(resource_fallback=["acme-prod"])), [])
+    def test_not_judged_from_period_totals(self):  # as fetch() reads them: each period's total on its first day
+        data = self.data(resource_fallback=["acme-prod"])
+        for r in data["views"]["resource"]["rows"]:
+            r["d"] = [sum(r["d"][:7])] + [0] * 6 + [sum(r["d"][7:])] + [0] * 6
+        self.assertEqual(self.devtest(data), [])
+
+    def test_another_subscriptions_period_totals_leave_this_one_judged(self):
+        (h,) = self.devtest(self.data(resource_fallback=["acme-big"]))
+        self.assertEqual((h["group"], h["resources"]), (self.DEV, 2))
 
     @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
     def test_the_page_names_the_group_and_opens_it(self):
@@ -2041,10 +2058,12 @@ class AdvisorLinkTest(unittest.TestCase):
         self.assertEqual(linked["covers_monthly"], round(120 / 3 * 30.4, 2))
 
     @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
-    def test_the_page_says_what_a_tip_covers_and_goes_there(self):
+    def test_the_page_names_a_tips_related_spend_and_goes_there(self):
         data = make_data(BILL, advisor=[tip(RESERVE_SQL, "SQL DB")])
         page = ViewerTest.run_page(self, data, "service")
-        self.assertIn("covers SQL Database · vCore ($1,216/mo)", page["side"])
+        # matched on service and meter, not SKU or region: more than a reservation would cover
+        self.assertIn("related spend: SQL Database · vCore ($1,216/mo)", page["side"])
+        self.assertNotIn("covers SQL Database", page["side"])
         page = ViewerTest.run_page(self, data, "service", click="[data-rec]:0")
         self.assertIn('<span class="cur">SQL Database</span>', page["crumbs"])
         self.assertIn('<div class="sel-name">vCore</div>', page["side"])
@@ -2134,6 +2153,10 @@ class Batch3ReviewTest(unittest.TestCase):
 
     def test_covers_is_explained_for_multi_subscription_runs(self):
         self.assertIn("across the whole bill", aztree.AI_INSTRUCTIONS)
+
+    def test_covers_is_explained_as_related_spend_not_what_a_reservation_covers(self):
+        self.assertIn("not by SKU or region", aztree.AI_INSTRUCTIONS)
+        self.assertIn("related spend", aztree.AI_INSTRUCTIONS)
 
     @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
     def test_dev_test_text_claims_only_what_was_measured(self):
@@ -2777,6 +2800,17 @@ class FocusPageTest(unittest.TestCase):
         self.assertNotIn("FOCUS", plain["meta"])
         one = ViewerTest.run_page(self, make_data([("Storage", "LRS", [1] * 6)], source={**FOCUS_SOURCE, "files": 1}), "service")
         self.assertIn("1 file, 2026-09-01", one["meta"])
+
+    @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+    def test_gaps_in_the_export_files_stay_on_the_page(self):  # not only in the terminal of whoever ran it
+        gap = "3 of the 60 days have no rows in the files (the first is 2026-09-04); download the export runs that cover them"
+        data = make_data([("Storage", "LRS", [1] * 6)], source={**FOCUS_SOURCE, "warnings": [gap, "2 days appear twice"]})
+        page = ViewerTest.run_page(self, data, "service")
+        self.assertIn("2 warnings about the export files", page["sub"])
+        self.assertIn(f'<div class="note">{gap}</div>', page["side"])  # the whole bill spells them out
+        for source in ({**FOCUS_SOURCE, "warnings": []}, FOCUS_SOURCE):  # none, or saved before there were any
+            plain = ViewerTest.run_page(self, make_data([("Storage", "LRS", [1] * 6)], source=source), "service")
+            self.assertNotIn("warning", plain["sub"] + plain["side"])
 
     @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
     def test_purchases_get_a_note(self):

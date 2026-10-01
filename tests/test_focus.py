@@ -201,7 +201,7 @@ class ReadRunTest(unittest.TestCase):
         amortized = self.read([row(1, 20.64, **PURCHASE)], metric="AmortizedCost")
         self.assertEqual(sum(self.totals(actual, "service").values()), 20.64)
         self.assertEqual(sum(self.totals(amortized, "service").values()), 0.0)
-        self.assertEqual((actual.purchases, amortized.purchases), ({"2026-09-01": 20.64}, {}))
+        self.assertEqual((actual.purchases, amortized.purchases), ({"2026-09-01": [20.64, 20.64]}, {}))  # cost, in USD
 
     def test_gzip_a_bom_and_dates_with_seconds(self):  # FOCUS 1.0r2 adds seconds; Excel and Storage Explorer add a BOM
         got = self.read(days(1, 1, ChargePeriodStart="2026-09-01T00:00:00Z"), name="part.csv.gz", encoding="utf-8-sig")
@@ -378,6 +378,14 @@ class ReadTest(unittest.TestCase):
         write_csv(self.dir / "a.csv", days(1, 30) + [row(29, 20.64, **PURCHASE), row(30, -20.64, **PURCHASE)])
         self.assertEqual(self.read()["commitment_purchases"], 0.0)  # bought and refunded: net
 
+    def test_purchases_turn_into_dollars_with_the_rest(self):  # a €90 reservation bought for $100, beside a USD bill
+        other = "/subscriptions/bbbbbbbb-1111-2222-3333-444444444444"
+        write_csv(self.dir / "a.csv", days(1, 30, 9.0, BillingCurrency="EUR", x_BilledCostInUsd="10")
+                  + days(1, 30, SubAccountId=other, SubAccountName="us", x_BilledCostInUsd="1")
+                  + [row(30, 90.0, **{**PURCHASE, "BillingCurrency": "EUR", "x_BilledCostInUsd": "100"})])
+        data = self.read()
+        self.assertEqual((data["currency"], data["commitment_purchases"]), ("USD", 100.0))
+
     def test_the_shape_fetch_returns(self):
         other = "/subscriptions/bbbbbbbb-1111-2222-3333-444444444444"
         write_csv(self.dir / "a.csv", days(1, 30) + days(1, 30, SubAccountId=other, SubAccountName="acme-dev",
@@ -401,14 +409,28 @@ class ReadTest(unittest.TestCase):
     def test_files_without_manifests_that_share_days_are_flagged(self):  # a download that left the manifests behind
         write_csv(self.dir / "run-a" / "part_0_0001.csv", days(1, 20))
         write_csv(self.dir / "run-b" / "part_0_0001.csv", days(1, 21))
-        self.read()
+        data = self.read()
         self.assertTrue(any("20 days appear in more than one file" in line for line in self.lines), self.lines)
+        self.assertIn("20 days appear in more than one file", " ".join(data["source"]["warnings"]))  # the page says it too
 
     def test_days_with_no_rows_in_the_window_are_flagged(self):  # July and September, but no August
         write_run(self.dir / "jul", days(1, 31, month="2026-07"), "2026-07-01", "2026-07-31", "2026-08-02T05:00:00Z")
         write_run(self.dir / "sep", days(1, 27), "2026-09-01", "2026-09-28", "2026-09-28T05:00:00Z")
-        self.assertEqual(len(self.read()["days"]), 60)
+        data = self.read()
+        self.assertEqual(len(data["days"]), 60)
         self.assertTrue(any("31 of the 60 days have no rows" in line for line in self.lines), self.lines)
+        self.assertIn("31 of the 60 days have no rows", " ".join(data["source"]["warnings"]))
+
+    def test_a_run_missing_files_is_flagged_on_the_page(self):  # only its folder's name: a shared page names no local path
+        write_run(self.dir / "run-1", days(1, 30), "2026-09-01", "2026-09-30", "2026-10-02T05:00:00Z",
+                  listed=("part_0_0001.csv", "part_1_0001.csv"))
+        (warning,) = self.read()["source"]["warnings"]
+        self.assertIn("run-1 is missing 1 of the files its manifest lists (part_1_0001.csv)", warning)
+        self.assertNotIn(str(self.dir), warning)
+
+    def test_complete_files_have_no_warnings(self):
+        write_csv(self.dir / "a.csv", days(1, 30))
+        self.assertEqual(self.read()["source"]["warnings"], [])
 
 
 class FocusCliTest(unittest.TestCase):

@@ -180,6 +180,9 @@ const SYMBOLS = { USD: "$", EUR: "€", GBP: "£", JPY: "¥", CNY: "¥", INR: "�
 const sym = code => esc(SYMBOLS[code || "USD"] ?? `${code} `);
 const CUR = DATA.mixed_currencies ? "" : sym(DATA.currency); // unconverted currencies: no one symbol would be true
 const MIXED = DATA.mixed_currencies ? `<span class="warn" title="Azure couldn't convert these subscriptions to one currency, so every amount adds different currencies">totals mix ${esc(DATA.mixed_currencies.join(" and "))}: Azure didn't convert them</span>` : "";
+// what FOCUS files lacked or held twice: named in the header, spelled out on the whole bill
+const GAPS = DATA.source?.warnings || [];
+const GAPS_NOTE = GAPS.length ? `<span class="warn" title="${esc(GAPS.join("\n"))}">${GAPS.length} warning${GAPS.length > 1 ? "s" : ""} about the export files</span>` : "";
 function money(v, s = CUR) {
   const a = Math.abs(v), p = (v < 0 ? "-" : "") + s;
   if (a >= 1e6) return p + (a / 1e6).toFixed(2) + "M";
@@ -466,7 +469,7 @@ function renderChrome(base) {
   const purchases = DATA.commitment_purchases >= 0.01
     ? `<span title="--metric AmortizedCost spreads them over their term">reservation and savings plan purchases ${money(DATA.commitment_purchases)}, booked the day they were bought</span>` : "";
   $("#sub").innerHTML = `<span><b>${money(root.cur)}</b> · ${period()}</span><span>${root.children.length} ${esc(DIM[A].many)} · ${leaves} ${esc(DIM[B].many)}</span>
-    ${MIXED}${purchases}${fallback}${untagged}${creditNote(root, "span")}${readout}<div class="legend">${legend}</div>`;
+    ${MIXED}${GAPS_NOTE}${purchases}${fallback}${untagged}${creditNote(root, "span")}${readout}<div class="legend">${legend}</div>`;
 }
 
 // a subscription with too many resources gets one total per resource and period, so no daily chart in that view
@@ -527,7 +530,7 @@ function renderSide() {
       <div><span>per day</span>${money(n.cur / DAYS)}</div>
       <div><span>monthly pace</span>${money((n.cur / DAYS) * 30.4)}</div>
       ${tail}
-    </div>${spark(n)}</section>`;
+    </div>${spark(n)}${n.kind === "root" ? GAPS.map(w => `<div class="note">${esc(w)}</div>`).join("") : ""}</section>`;
 
   const hints = worthALook(), gerr = DATA.graph_error;
   // Resource Graph checks that couldn't run: say so where their findings would be
@@ -562,29 +565,32 @@ const row = (attr, color, title, full, value, tag, whyHtml, whyTitle) => `<div c
 // a long list opens in place: "show all N" / "show fewer"
 const showAll = (list, n, cap) => (n > cap
   ? `<div class="showall" data-more="${list}" role="button" tabindex="0">${state.expanded[list] ? "show fewer" : `show all ${n}`}</div>` : "");
-// the export's copy of Advisor's tips knows which meters a reservation or savings plan would cover
+// the export's copy of Advisor's tips knows each reservation or savings plan's related meters
 const TIPS = DATA.export?.advisor ?? DATA.advisor;
-// "covers SQL Database · vCore ($1,216/mo) + 1 more", or who/what the tip is about
+// "related spend: SQL Database · vCore ($1,216/mo) + 1 more", or who/what the tip is about. Related, not covered:
+// the meters match the tip's kind, not its SKU or region, so a reservation would cover only part of it
 const tipLine = r => (r.covers?.length
-  ? `covers ${shortSvc(r.covers[0].service)} · ${r.covers[0].meter} (${money(r.covers_monthly)}/mo)${r.covers.length > 1 ? ` + ${r.covers.length - 1} more` : ""}`
+  ? `related spend: ${shortSvc(r.covers[0].service)} · ${r.covers[0].meter} (${money(r.covers_monthly)}/mo)${r.covers.length > 1 ? ` + ${r.covers.length - 1} more` : ""}`
   : [r.resource_name, r.sku, r.region, Object.hasOwn(TERM, r.term) && TERM[r.term]].filter(Boolean).join(" · "));
 function advisorPanel() {
-  const recs = TIPS;
+  const recs = TIPS, err = DATA.advisor_error, access = /^HTTP 40[13]\b/.test(err || "");
   if (!recs) return "";
   if (!recs.length) {
-    const err = DATA.advisor_error;
     const why = !err ? "Advisor has no cost recommendations."
-      : /^HTTP 40[13]\b/.test(err) ? "Advisor wasn't readable with this login (needs Reader)."
+      : access ? "Advisor wasn't readable with this login (needs Reader)."
       : `Advisor couldn't be read (${esc(err)}).`;
     return `<div class="advh h">Advisor</div><section><div class="note">${why}</div></section>`;
   }
+  // some subscriptions answered and another didn't: say so under their tips, like the Resource Graph note
+  const missing = !err ? "" : `<div class="note">${access
+    ? "Advisor needs Reader, and wasn't read where it's missing." : `Advisor couldn't be read everywhere (${esc(err)}).`}</div>`;
   const top = state.expanded.recs ? recs : recs.slice(0, SHOWN_RECS);
   // the header is the aside's own child, so it can stick to the bottom while the lists above it scroll
   return `<div class="advh h" data-adv role="button" tabindex="0">Advisor <b>${recs.length} cost tip${recs.length > 1 ? "s" : ""}</b></div><section>` +
     top.map((r, i) => row(`data-rec="${i}"`, "var(--advisor)", r.problem, r.solution || r.problem,
       r.annual_savings ? money(r.annual_savings, sym(r.currency || DATA.currency)) + "/yr" : "–", null, esc(tipLine(r)),
       [r.resource_name, r.sku, r.region, Object.hasOwn(TERM, r.term) && TERM[r.term]].filter(Boolean).join(" · "))).join("") +
-    showAll("recs", recs.length, SHOWN_RECS) + `</section>`;
+    showAll("recs", recs.length, SHOWN_RECS) + missing + `</section>`;
 }
 
 // ---------- biggest drops: what fell since the previous period, including what went to zero (always the service view)

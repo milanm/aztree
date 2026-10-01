@@ -961,8 +961,11 @@ AI_INSTRUCTIONS = (
     "always-on compute in dev/test groups, idle resources, steady spend worth committing). `advisor` holds "
     "Azure Advisor's cost recommendations, one per kind, resource and SKU, with the largest annual saving Advisor "
     "reported; recommendations that cover the same usage (a reservation and a savings plan, a 1-year and a 3-year term) "
-    "are alternatives, not additive. A tip's `covers` lists the meters its reservation or savings plan would cover, "
-    "matched across the whole bill, so in a multi-subscription export it can include other subscriptions' usage. "
+    "are alternatives, not additive. A tip's `covers` lists the meters of the kind its reservation or savings plan "
+    "commits to, matched by service and meter, not by SKU or region, across the whole bill: it is related spend, not "
+    "what the commitment would cover. A reservation covers only its SKU family and region, so less than this; a savings "
+    "plan spans SKUs and regions but only up to its hourly commitment. In a multi-subscription export it can include "
+    "other subscriptions' usage. "
     "`by_tag` splits the bill by the values of the tag named in `tag`; the row marked `untagged: true` (shown as "
     "\"(untagged)\") is spend on resources without it. `forecast` is Azure's own forecast for the current calendar month: `actual` is billed so far, `forecast` is "
     "still to come and `total` is both. Hints of kind `idle` are resources Azure Resource Graph found billing while "
@@ -971,7 +974,9 @@ AI_INSTRUCTIONS = (
     "disconnected private endpoints, App Service plans with no apps, elastic pools with no databases), with what they "
     "cost in the current period. "
     "`source`, when present, says the data came from Cost Management FOCUS export files instead of the API, so "
-    "Advisor, the idle checks and the forecast didn't run. `totals.commitment_purchases` is the net cost of "
+    "Advisor, the idle checks and the forecast didn't run; `source.warnings` lists what the files lacked or held twice "
+    "(an export run missing files, days with no rows, days in more than one file), so totals may be low or double "
+    "there: say so before drawing conclusions. `totals.commitment_purchases` is the net cost of "
     "reservation and savings plan purchases in the current period (ActualCost only). The `(untagged)` row in "
     "`by_tag` has `how_to_fix` when untagged spend is a tenth of the bill or more. "
     "Please: 1) explain what drives the cost, 2) explain notable changes vs the previous period, "
@@ -1024,8 +1029,9 @@ ALWAYS_ON = re.compile(r"/providers/microsoft\.(?:compute/(?:virtualmachines|vir
 
 def always_on(data, floor):
     """Dev/test resource groups whose compute runs flat all period (lowest day at least 90% of the highest):
-    one hint per group. Needs daily data, so nothing when the resource view has period totals only."""
-    if data.get("resource_fallback") or len(data["days"]) - data["split"] < MIN_PATTERN_DAYS:
+    one hint per group. Needs daily data: a subscription read as period totals has its days at zero but the first, so
+    its resources never look flat, and the other subscriptions are still judged."""
+    if len(data["days"]) - data["split"] < MIN_PATTERN_DAYS:
         return []
     view, split = data["views"]["resource"], data["split"]
     subs = {s["id"].lower(): s["name"] for s in data.get("subscriptions", [])}
@@ -1081,8 +1087,8 @@ def reservable(service, meter, kinds=tuple(RESERVABLE)):
 
 
 def link_tip(rec, line_items, n):
-    """An Advisor tip plus the meters its reservation or savings plan would cover (biggest first) and their monthly
-    pace. Other tips cover nothing."""
+    """An Advisor tip plus the meters of the kind its reservation or savings plan commits to (biggest first) and their
+    monthly pace: related spend, matched by service and meter, not the tip's SKU or region. Other tips cover nothing."""
     kinds = commitment_kinds(rec)
     covers = [{"service": x["service"], "meter": x["meter"], "current": x["current"]} for x in line_items
               if kinds and x["current"] > 0 and reservable(x["service"], x["meter"], kinds)]

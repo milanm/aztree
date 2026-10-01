@@ -81,7 +81,7 @@ def manifest_run(path, log):
     info = obj(manifest.get("runInfo"))
     run = {"name": str(path.parent), "files": files, "start": day_of(info.get("startDate")),
            "end": day_of(info.get("endDate")), "submitted": day_of(info.get("submittedTime")),
-           "submitted_at": str(info.get("submittedTime") or ""), "named": False, "incomplete": bool(missing)}
+           "submitted_at": str(info.get("submittedTime") or ""), "named": False, "missing": missing}
     if not (run["start"] and run["end"] and run["submitted"]):  # a manifest aztree doesn't understand: read it like a file
         run.update(start=None, end=None, submitted=None, submitted_at="")
     return (run if files else None), [f for f in here if is_parquet(f)]
@@ -199,7 +199,7 @@ class Rows:
         self.groups = {}  # resource group key -> (label, subscription guid)
         self.tagged = set()  # (resource id, raw Tags): the tag view's key is chosen from these
         self.tag_rows = Counter()  # raw Tags -> rows, to say how many had Tags that aren't JSON
-        self.purchases = {}  # day -> net cost of reservation and savings plan purchases (ActualCost only)
+        self.purchases = {}  # day -> net cost of reservation and savings plan purchases, and in USD (ActualCost only)
         self.last = {}  # run name -> the last day read from it
         self.seen = {}  # run name -> the days read from it
         self.first = None  # the first day read
@@ -233,13 +233,14 @@ class Rows:
             self.tagged.add((rid, tags))
         self.tag_rows[tags] += 1
         region = region_name(row[col["RegionName"]] or row[col["RegionId"]])
-        for view, key in (("service", (service, meter)), ("subscription", (sub, service)), ("region", (region, service)),
-                          ("resource", (group, rid or "(no resource)")), ("tags", (tags, service))):
-            s = self.sums[view].setdefault((key, day), [0.0, 0.0])
+        sums = [self.sums[view].setdefault((key, day), [0.0, 0.0]) for view, key in (
+            ("service", (service, meter)), ("subscription", (sub, service)), ("region", (region, service)),
+            ("resource", (group, rid or "(no resource)")), ("tags", (tags, service)))]
+        if self.metric == "ActualCost" and row[col["ChargeCategory"]] == "Purchase" and row[col["CommitmentDiscountType"]]:
+            sums.append(self.purchases.setdefault(day, [0.0, 0.0]))
+        for s in sums:
             s[0] += cost
             s[1] = None if s[1] is None or usd is None else s[1] + usd
-        if self.metric == "ActualCost" and row[col["ChargeCategory"]] == "Purchase" and row[col["CommitmentDiscountType"]]:
-            self.purchases[day] = self.purchases.get(day, 0.0) + cost
 
 
 def read_run(run, rows, log=print):
@@ -297,7 +298,7 @@ def own_days(runs, log=print):
     taken, lost = set(), 0
     # a run missing some of its files only gets the days no complete run covers
     newest = sorted((r for r in runs if r["start"]), reverse=True,
-                    key=lambda r: (not r.get("incomplete"), submitted_key(r["submitted_at"]), r["end"]))
+                    key=lambda r: (not r.get("missing"), submitted_key(r["submitted_at"]), r["end"]))
     for run in newest:
         covered = set(days_between(run["start"], run["end"]))
         lost += len(covered & taken)
@@ -408,14 +409,23 @@ def read(runs, days, metric, tag=None, log=print):
     bad = sum(rows.tag_rows[t] for t, v in parsed.items() if v is None)
     if bad:
         log(f"  {bad} row{'s have' if bad != 1 else ' has'} Tags that aren't JSON objects; they count as untagged")
+    # what the totals may lack or count twice, kept for the page and the export: a shared report doesn't lose them.
+    # A run's folder name only, not its path. find_runs() already printed the missing files.
+    warnings = [f"the export run in {Path(r['name']).name} is missing {len(r['missing'])} of the files its manifest "
+                f"lists ({', '.join(r['missing'][:3])}): its days may be undercounted" for r in exported_open if r.get("missing")]
+
+    def warn(text):
+        log("  " + text)
+        warnings.append(text)
+
     repeated = sum(1 for n in Counter(d for r in opened for d in rows.seen.get(r["name"], ())).values() if n > 1)
     if repeated:  # export runs never share a day, so a file without a manifest is in each of these
-        log(f"  {repeated} day{'s appear' if repeated != 1 else ' appears'} in more than one file without a manifest; "
-            "if the files are repeated runs of one export, keep their manifests or pass one file")
+        warn(f"{repeated} day{'s appear' if repeated != 1 else ' appears'} in more than one file without a manifest; "
+             "if the files are repeated runs of one export, keep their manifests or pass one file")
     empty = [d for d in dates if d not in rows.currencies]
     if empty:
-        log(f"  {len(empty)} of the {len(dates)} days have no rows in the files (the first is {empty[0]}); "
-            "download the export runs that cover them")
+        warn(f"{len(empty)} of the {len(dates)} days have no rows in the files (the first is {empty[0]}); "
+             "download the export runs that cover them")
     found = set().union(*(rows.currencies.get(d, set()) for d in dates)) - {""}
     currency, usd, mixed, usd_rate = pick_currency(found, raw, log)
     many = len(rows.sub_names) > 1  # like fetch(): a group's label names its subscription when there are several
@@ -426,7 +436,8 @@ def read(runs, days, metric, tag=None, log=print):
     if chosen:
         views["tag"] = {"dims": ["TagValue", "ServiceName"], "names": {}, "tag": chosen,
                         "rows": fold(raw["tag"], len(dates), usd)}
-    purchases = round(sum(rows.purchases.get(d, 0.0) for d in dates[days:]), 2) if metric == "ActualCost" else None
+    bought = [rows.purchases[d] for d in dates[days:] if d in rows.purchases]  # in dollars when the views are
+    purchases = round(sum((u or 0.0) if usd else c for c, u in bought), 2) if metric == "ActualCost" else None
     return {
         "days": dates, "split": days, "views": views, "currency": currency,
         "subscriptions": [{"id": s, "name": rows.sub_names[s], "currency": rows.sub_currencies[s].most_common(1)[0][0]}
@@ -435,6 +446,6 @@ def read(runs, days, metric, tag=None, log=print):
         "mixed_currencies": mixed, "usd_rate": usd_rate,
         "forecast": None, "forecast_note": None, "graph": None, "graph_error": None, "demo": False,
         "source": {"kind": "focus", "files": rows.files, "rows": rows.rows, "first": rows.first,
-                   "last": max(rows.last.values())},
+                   "last": max(rows.last.values()), "warnings": warnings},
         "commitment_purchases": purchases,
     }

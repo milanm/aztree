@@ -55,7 +55,7 @@ The page opens in your browser. It shows the last 30 days, compared with the 30 
   - Monitoring: Log Analytics ingestion and 1-minute alert rules.
   - Azure DevOps: seats and hosted jobs.
 - **Biggest drops:** what fell since the previous period, including anything that went to zero. Use it to check that a saving worked.
-- **Advisor:** Azure Advisor's cost tips for reservations, savings plans and right-sizing, one per resource and SKU. Reservation and savings-plan tips list the meters they would cover and what those cost a month. Click a tip to jump to its biggest meter, or to the resource it's about.
+- **Advisor:** Azure Advisor's cost tips for reservations, savings plans and right-sizing, one per resource and SKU. Reservation and savings-plan tips show related spend: the meters of the kind they commit to, and what those cost a month. aztree matches them by service and meter, not by SKU or region, so a reservation covers less than that. Click a tip to jump to its biggest meter, or to the resource it's about.
 - **Export for AI:** a JSON summary to hand to any AI agent (see below).
 
 On the map:
@@ -116,7 +116,7 @@ Organizations on an Enterprise Agreement (EA) or a Microsoft Customer Agreement 
 
 4. Run `aztree --focus ./focus`.
 
-aztree reads the newest run for each day, so repeated runs don't count twice. Download one export at a time: two exports of the same days would overlap. The period ends on the last complete day. When the files cover less than two periods, aztree shortens the period and says so.
+aztree reads the newest run for each day, so repeated runs don't count twice. Download one export at a time: two exports of the same days would overlap. The period ends on the last complete day. When the files cover less than two periods, aztree shortens the period and says so. When a run is missing files, days have no rows, or a day is in two files, the page and the summary say so too, so whoever you send them to sees it.
 
 A file someone sends you works too: `aztree --focus costs.csv`.
 
