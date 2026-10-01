@@ -16,8 +16,33 @@ concurrency:
   group: pages
   cancel-in-progress: false
 jobs:
+  release:
+    # which aztree to show: after a release, that release, once PyPI serves it; otherwise the latest. None when the
+    # release never reached PyPI (cancelled, or failed before it published). No environment here: the deploy it then
+    # skips leaves no failed deployment on github-pages, which the repository page would show as the latest.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (startsWith(github.event.workflow_run.head_branch, 'v') && github.event.workflow_run.conclusion != 'cancelled')
+    runs-on: ubuntu-latest
+    outputs:
+      spec: ${{ steps.find.outputs.spec }}
+    steps:
+      - id: find
+        env:
+          TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          version="${TAG#v}"
+          if [[ ! "$version" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then echo "spec=aztree" >> "$GITHUB_OUTPUT"; exit 0; fi
+          for try in 1 2 3 4 5 6; do  # PyPI can take a minute to serve a new release
+            if curl -sf "https://pypi.org/pypi/aztree/$version/json" > /dev/null; then
+              echo "spec=aztree==$version" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            sleep 30
+          done
+          echo "aztree $version isn't on PyPI: that release didn't publish, so the demo stays as it is"
   deploy:
-    if: github.event_name != 'workflow_run' || startsWith(github.event.workflow_run.head_branch, 'v')
+    needs: release
+    if: needs.release.outputs.spec != ''
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -28,12 +53,9 @@ jobs:
           python-version: "3.13"
       - name: Build the demo page from the release on PyPI
         env:
-          TAG: ${{ github.event.workflow_run.head_branch }}
+          SPEC: ${{ needs.release.outputs.spec }}
         run: |
-          # after a release, that release (PyPI can take a minute to serve it); otherwise the latest
-          version="${TAG#v}"
-          [[ "$version" =~ ^[0-9]+(\.[0-9]+)*$ ]] && spec="aztree==$version" || spec="aztree"
-          for try in 1 2 3 4 5 6; do pip install --no-cache-dir "$spec" && break; sleep 30; done
+          for try in 1 2 3 4 5 6; do pip install --no-cache-dir "$SPEC" && break; sleep 30; done
           aztree --version
           mkdir site
           AZTREE_HOME="$RUNNER_TEMP" aztree --demo --no-open --out site/index.html
