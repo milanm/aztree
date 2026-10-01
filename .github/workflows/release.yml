@@ -79,6 +79,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v4
@@ -86,13 +88,18 @@ jobs:
           pattern: native-*
           merge-multiple: true
           path: native/
+      # signed proof that this workflow built each executable from the tagged commit, which anyone can check with
+      # `gh attestation verify <file> --repo milanm/aztree`: the downloads aren't code-signed, and antivirus guesses
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: native/*
       - name: A GitHub release with the executables attached
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           notes="$(git log -1 --format=%b)
 
-          Install with \`pipx install aztree\` or \`dotnet tool install -g aztree\`, or download the executable for your system below. The downloads aren't signed yet: Windows and macOS ask once before running them."
+          Install with \`pipx install aztree\` or \`dotnet tool install -g aztree\`, or download the executable for your system below. The downloads aren't signed yet: Windows and macOS ask once before running them, and a few antivirus engines flag the Windows executable, as they do many Python tools packed with PyInstaller. Check that a download was built here with \`gh attestation verify <file> --repo milanm/aztree\`, or install with pipx, which runs the plain Python source."
           gh release create "$GITHUB_REF_NAME" native/* --title "aztree ${GITHUB_REF_NAME#v}" --notes "$notes"
   nuget:
     # trusted publishing: NuGet.org trusts this workflow, no API key is stored. Off until the NUGET_USER variable is set.
