@@ -27,7 +27,8 @@ jobs:
           name: dist
           path: dist/
   publish:
-    needs: build
+    # after every executable built: PyPI never takes a version twice, so a failed build must stop the release here
+    needs: [build, binaries]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
