@@ -174,6 +174,17 @@ Everything it writes goes to `~/.aztree/` (or `AZTREE_HOME`), outside any git re
 
 The page loads nothing from the internet.
 
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org). aztree has applied to the SignPath Foundation program; until it signs the first release, the Windows executable stays unsigned.
+
+Only the release workflow signs, and only executables it builds from this repository's tagged commits. Every signing request is approved by hand.
+
+- Committers and reviewers: [Milan Milanović](https://github.com/milanm)
+- Approvers: [Milan Milanović](https://github.com/milanm)
+
+This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it. When you run it, aztree calls Azure with your own login to read your costs, and nothing else (see [Privacy](#privacy)).
+
 ## Development
 
 ```bash
