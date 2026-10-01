@@ -118,6 +118,15 @@ aside { grid-column: 2; grid-row: 2 / 4; border-left: 1px solid var(--line); bac
 .note { color: var(--dim); margin-top: 9px; }
 .showall { color: var(--muted); margin-top: 10px; font-size: 11px; cursor: pointer; }
 .showall:hover { color: var(--text); }
+.items { margin: 2px 0 8px; padding-left: 10px; border-left: 2px solid var(--c, var(--accent)); }
+.items + .hint { border-top: 1px solid var(--line); }
+.item { display: flex; align-items: baseline; gap: 8px; padding: 4px 0; font-size: 11.5px; cursor: pointer; }
+/* the name keeps its width, the group gives way */
+.item .in { flex: 0 1 auto; max-width: 62%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item .ig { flex: 1 1 0; min-width: 0; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item .iv { white-space: nowrap; }
+.item a { color: var(--muted); text-decoration: none; }
+.item:hover .in, .item[aria-current] .in, .item a:hover { color: #fff; }
 
 footer { grid-column: 1 / -1; display: flex; align-items: center; gap: 14px; padding: 7px 14px; border-top: 1px solid var(--line);
   color: var(--dim); white-space: nowrap; overflow: hidden; }
@@ -496,10 +505,14 @@ const armId = n => n.kind === "root" || n.more || DATA.demo ? null
   : /^\/subscriptions\/[^/]+/i.test(n.key) ? n.key : null;
 // the portal opens another tenant's subscription only in that tenant's directory: #@<tenant>/resource/...
 const TENANTS = Object.fromEntries((DATA.subscriptions || []).filter(s => s.tenant).map(s => [String(s.id).toLowerCase(), s.tenant]));
+const portalHref = id => {
+  if (!id || !DATA.portal || DATA.demo) return null;
+  const tenant = TENANTS[(id.match(/^\/subscriptions\/([^/]+)/i) || [])[1]?.toLowerCase()];
+  return `${DATA.portal}/#${tenant ? `@${encodeURIComponent(tenant)}/` : ""}resource${encodeURI(id)}`;
+};
 const portalLink = (n, html) => {
-  const id = armId(n), tenant = id && TENANTS[(id.match(/^\/subscriptions\/([^/]+)/i) || [])[1]?.toLowerCase()];
-  const at = tenant ? `@${esc(encodeURIComponent(tenant))}/` : "";
-  return id && DATA.portal ? `<a href="${esc(DATA.portal)}/#${at}resource${esc(encodeURI(id))}" target="_blank" rel="noopener noreferrer" title="open in the Azure portal">${html}</a>` : html;
+  const href = portalHref(armId(n));
+  return href ? `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer" title="open in the Azure portal">${html}</a>` : html;
 };
 
 function renderSide() {
@@ -540,7 +553,11 @@ function renderSide() {
     const shown = state.expanded.hints ? hints : hints.slice(0, SHOWN_HINTS);
     // a count, not a sum: a dev/test group's total can include meters that are hints of their own
     html += `<section><div class="h">Worth a look${hints.length ? ` <b>${hints.length}</b>` : ""}</div>` +
-      shown.map((h, i) => row(`data-hint="${i}"`, h.c, h.title, h.n.full, money(h.value), HINT_TAG[h.h.kind] || "look", esc(h.why), h.why)).join("") +
+      shown.map((h, i) => {
+        const key = h.list && `idle-${h.h.check}`, open = key && state.expanded[key];
+        return row(`data-hint="${i}"${key ? ` aria-expanded="${!!open}"` : ""}`, h.c, h.title, h.n.full, money(h.value),
+          HINT_TAG[h.h.kind] || "look", esc(h.why), h.why) + (open ? idleItems(h, i, key) : "");
+      }).join("") +
       showAll("hints", hints.length, SHOWN_HINTS) + graphNote + `</section>`;
   }
   const drops = biggestDrops();
@@ -593,6 +610,20 @@ function advisorPanel() {
     showAll("recs", recs.length, SHOWN_RECS) + missing + `</section>`;
 }
 
+// an idle finding's resources, opened under its row, biggest first: a click shows one on the map, ↗ opens the portal
+const SHOWN_ITEMS = 10;
+function idleItems(x, i, key) {
+  const all = x.h.resources, names = DATA.views.resource?.names || {};
+  const shown = state.expanded[key + "-all"] ? all : all.slice(0, SHOWN_ITEMS);
+  return `<div class="items" style="--c:${x.c}">` + shown.map((r, j) => {
+    const href = portalHref(r.id), here = state.sel?.kind === "leaf" && state.sel.key === r.id;
+    return `<div class="item" data-idle="${i}.${j}"${here ? ' aria-current="true"' : ""} role="button" tabindex="0">` +
+      `<span class="in" title="${esc(r.id)}">${esc(r.name)}</span><span class="ig">${esc(names[r.group] || lastSeg(r.group))}</span>` +
+      `<span class="iv">${money(r.current)}</span>${href ? `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer" ` +
+      `title="open in the Azure portal" aria-label="open ${esc(r.name)} in the Azure portal">↗</a>` : ""}</div>`;
+  }).join("") + showAll(key + "-all", all.length, SHOWN_ITEMS) + `</div>`;
+}
+
 // ---------- biggest drops: what fell since the previous period, including what went to zero (always the service view)
 let _drops;
 function biggestDrops() {
@@ -620,9 +651,10 @@ function worthALook() {
       const n = groups.get(h.group);
       return n && { h, n, c, why, title: n.name, value: h.amount, view: "resource", find: m => m.kind === "group" && m.key === h.group };
     }
-    if (h.kind === "idle") { // several resources: a click opens the biggest, which the reason names
+    if (h.kind === "idle") { // one resource: a click opens it; several: a click lists them (idleItems)
       const top = h.resources[0], n = groups.get(top.group)?.children.find(c => c.key === top.id);
-      return n && { h, n, c, why, title: h.label, value: h.amount, view: "resource", find: m => m.kind === "leaf" && m.key === top.id };
+      return n && { h, n, c, why, title: h.label, value: h.amount, view: "resource", list: h.resources.length > 1,
+        find: m => m.kind === "leaf" && m.key === top.id };
     }
     if (h.kind === "steady") {
       const n = t.children.find(g => g.key === h.service);
@@ -761,10 +793,23 @@ $("#side").addEventListener("click", e => {
   if (e.target.closest("[data-adv]")) { $("#side").scrollTop = $("#side").scrollHeight; return; }
   const more = e.target.closest("[data-more]");
   if (more) { state.expanded[more.dataset.more] = !state.expanded[more.dataset.more]; renderSide(); return; }
+  const it = e.target.closest("[data-idle]");
+  if (it) {
+    if (e.target.closest("a")) return; // ↗ opens the portal; the map stays put
+    const [i, j] = it.dataset.idle.split(".").map(Number), res = worthALook()[i].h.resources[j];
+    reveal("resource", m => m.kind === "leaf" && m.key === res.id);
+    return;
+  }
   const h = e.target.closest("[data-hint]"), dr = e.target.closest("[data-drop]"), r = e.target.closest("[data-rec]");
   const same = leaf => n => n.kind === "leaf" && n.key === leaf.key && n.parent.key === leaf.parent.key;
   if (h) {
     const x = worthALook()[+h.dataset.hint];
+    if (x.list) { // several idle resources: open or close their list, and stay where the map is
+      const key = `idle-${x.h.check}`;
+      state.expanded[key] = !state.expanded[key];
+      renderSide();
+      return;
+    }
     reveal(x.view, x.find);
   } else if (dr) {
     const leaf = biggestDrops()[+dr.dataset.drop].n;

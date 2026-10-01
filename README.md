@@ -44,7 +44,7 @@ The page opens in your browser. It shows the last 30 days, compared with the 30 
 - **Worth a look:** one list where news and to-dos take turns. The first six show, and "show all" opens the rest. On the map, the boxes a to-do is about have diagonal stripes.
   - **News** is costs that grew and one-off spikes (a day far above that meter's usual).
   - **To-dos** are known money pits (below) and compute left on all week in dev/test resource groups. When Advisor has no reservation or savings-plan tips, steady spend that a reservation could cut shows up too.
-  - **Idle resources** bill while doing nothing, and they count as to-dos. aztree finds them with Azure Resource Graph and lists the ones that cost something in the period.
+  - **Idle resources** bill while doing nothing, and they count as to-dos. aztree finds them with Azure Resource Graph and lists the ones that cost something in the period. When one check finds several, such as 3 unattached disks, click the row to list them all, each with its cost and a link to the portal. Click a resource in the list to see it on the map.
     - Compute and storage: VMs stopped but not deallocated, unattached disks, Premium disks of VMs deallocated for over 30 days, and snapshots older than 90 days or on Premium storage.
     - Networking: unused public IPs, NAT gateways on no subnet, and VPN or ExpressRoute gateways with no connections. Also Application Gateways and load balancers with no backends, ExpressRoute circuits the provider hasn't set up, and disconnected private endpoints.
     - Apps and databases: empty App Service plans and SQL elastic pools with no databases.

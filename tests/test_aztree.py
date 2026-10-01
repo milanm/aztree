@@ -1440,6 +1440,11 @@ class Batch4DemoTest(unittest.TestCase):
         checks = {h["check"] for h in self.summary["hints"] if h["kind"] == "idle"}
         self.assertEqual(checks, {"unattached-disk", "old-snapshot", "unused-ip", "lonely-gateway"})
 
+    def test_has_an_idle_finding_with_a_list_to_open(self):  # what the page's idle list looks like, on the live demo
+        (disks,) = [h for h in self.summary["hints"] if h.get("check") == "unattached-disk"]
+        self.assertEqual(disks["label"], "3 unattached disks")
+        self.assertEqual(len({r["group"] for r in disks["resources"]}), 2)  # in two resource groups
+
     def test_regions_have_the_portals_names(self):
         regions = {r["k"][0] for r in self.data["views"]["region"]["rows"]}
         self.assertEqual(regions, {"East US", "East US 2", "West US 2", "West Europe", "Global"})
@@ -2320,6 +2325,65 @@ class Batch4PageTest(unittest.TestCase):
         self.assertIn("Resource Graph checks need Reader", page["side"])
         page = self.run_page(make_data([("Storage", "LRS", [5] * 6)], graph=[], graph_error="HTTP 500"), "service")
         self.assertIn("didn't run everywhere (HTTP 500)", page["side"])  # a tenant may have answered
+
+
+@unittest.skipUnless(aztree.shutil.which("node"), "node not installed")
+class IdleCardTest(unittest.TestCase):
+    """An idle finding with several resources opens a list of them, each with its cost and portal link."""
+    render = ViewerTest.render
+    run_page = ViewerTest.run_page
+
+    @staticmethod
+    def disks(n, **extra):
+        """n unattached disks in rg-app; d1 costs most ($3n over the 3 current days), then d2, and so on."""
+        ids = [f"{RG}/providers/microsoft.compute/disks/d{i + 1}" for i in range(n)]
+        graph = [{"check": "unattached-disk", "id": d, "name": d.rsplit("/", 1)[1], "resourceGroup": "rg-app",
+                  "subscriptionId": "aaaa-1"} for d in ids]
+        rows = [(RG, d, [n - i] * 6) for i, d in enumerate(ids)]
+        return make_data([("Storage", "P10 LRS Disk", [n * (n + 1) / 2] * 6)], resource_rows=rows, graph=graph, **extra)
+
+    def test_several_idle_resources_open_a_list_instead_of_jumping(self):
+        closed = self.run_page(self.disks(3), "service")["side"]
+        self.assertIn('data-hint="0" aria-expanded="false"', closed)
+        self.assertNotIn("data-idle", closed)
+        data = self.disks(3)
+        data["subscriptions"][0]["tenant"] = "t-one"
+        page = self.run_page(data, "service", click="[data-hint]:0")
+        self.assertIn("all services", page["crumbs"])  # nothing jumped
+        side = page["side"]
+        self.assertIn('data-hint="0" aria-expanded="true"', side)
+        self.assertEqual(side.count("data-idle="), 3)
+        self.assertLess(side.index(">d1<"), side.index(">d2<"))  # biggest first
+        self.assertIn("$9.00", side)  # d1's own cost
+        self.assertIn(f'href="{aztree.PORTAL}/#@t-one/resource{RG}/providers/microsoft.compute/disks/d2"', side)
+        self.assertIn(">rg-app<", side)
+
+    def test_one_idle_resource_has_no_list(self):  # its row jumps to it, as before
+        self.assertNotIn("aria-expanded", self.run_page(self.disks(1), "service")["side"])
+
+    def test_an_item_jumps_to_its_resource_and_the_list_stays_open(self):
+        page = self.run_page(self.disks(3), "service", click=["[data-hint]:0", "[data-idle]:0.1"])
+        self.assertIn("all resource groups", page["crumbs"])
+        self.assertIn(f'<div class="sel-name"><a href="{aztree.PORTAL}/#resource{RG}/providers/microsoft.compute/disks/d2"',
+                      page["side"])
+        self.assertEqual(page["side"].count("data-idle="), 3)  # still open, to go on to the next one
+        self.assertIn('data-idle="0.1" aria-current="true"', page["side"])
+
+    def test_items_answer_the_keyboard(self):
+        page = self.run_page(self.disks(3), "service", click=["[data-hint]:0", {"press": "Enter", "row": "[data-idle]:0.2"}])
+        self.assertIn('title="open in the Azure portal">d3</a></div>', page["side"])
+
+    def test_a_long_list_shows_ten_then_all(self):
+        page = self.run_page(self.disks(12), "service", click="[data-hint]:0")
+        self.assertEqual(page["side"].count("data-idle="), 10)
+        self.assertIn("show all 12", page["side"])
+        page = self.run_page(self.disks(12), "service", click=["[data-hint]:0", "[data-more]:idle-unattached-disk-all"])
+        self.assertEqual(page["side"].count("data-idle="), 12)
+
+    def test_the_demo_links_nowhere(self):  # its resource ids are made up
+        page = self.run_page(self.disks(3, demo=True), "service", click="[data-hint]:0")
+        self.assertEqual(page["side"].count("data-idle="), 3)
+        self.assertNotIn("/#resource", page["side"])
 
 
 @unittest.skipUnless(aztree.shutil.which("node"), "node not installed")

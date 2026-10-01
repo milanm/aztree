@@ -772,8 +772,10 @@ DEMO = [
     ("Event Hubs", "Standard Throughput Unit", 3.6, 0, [(D, "eu west", "rg-etl", "microsoft.eventhub/namespaces/evh-ingest", 1)]),
     ("Container Registry", "Standard Registry Unit", 0.67, 0, [(P, "us east", "rg-app-prod", "microsoft.containerregistry/registries/acmecr", 1)]),
     ("Key Vault", "Operations", 0.3, 0, [(P, "us east", "rg-app-prod", "microsoft.keyvault/vaults/kv-app-prod", 1)]),
-    # its VM was deleted, the disk wasn't: Resource Graph finds it unattached (demo_graph)
+    # their VMs were deleted, the disks weren't: Resource Graph finds them unattached (demo_graph)
     ("Storage", "P10 LRS Disk", 0.65, 0, [(S, "us east", "rg-legacy", "microsoft.compute/disks/vm-old-ftp-osdisk", 1)]),
+    ("Storage", "P20 LRS Disk", 2.41, 0, [(S, "us east", "rg-legacy", "microsoft.compute/disks/vm-old-ftp-datadisk", 1)]),
+    ("Storage", "E10 LRS Disk", 0.32, 0, [(X, "us west 2", "rg-sandbox", "microsoft.compute/disks/disk-test-restore", 1)]),
     # the site-to-site VPN to the old office: the office closed, the gateway didn't (demo_graph finds it unused)
     ("VPN Gateway", "VpnGw1", 4.56, 0, [(S, "us east", "rg-network-staging",
                                         "microsoft.network/virtualnetworkgateways/vgw-staging", 1)]),
@@ -816,6 +818,8 @@ def demo_graph():
                 "resourceGroup": rg, "subscriptionId": sub}
 
     return [found("unattached-disk", S, "rg-legacy", "microsoft.compute/disks/vm-old-ftp-osdisk"),
+            found("unattached-disk", S, "rg-legacy", "microsoft.compute/disks/vm-old-ftp-datadisk"),
+            found("unattached-disk", X, "rg-sandbox", "microsoft.compute/disks/disk-test-restore"),
             found("old-snapshot", P, "rg-backup", "microsoft.compute/snapshots/snap-vm-app-01-2025"),
             found("unused-ip", X, "rg-sandbox", "microsoft.network/publicipaddresses/pip-old-test"),
             found("lonely-gateway", S, "rg-network-staging", "microsoft.network/virtualnetworkgateways/vgw-staging")]
