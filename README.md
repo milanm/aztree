@@ -22,7 +22,7 @@ brew install milanm/tap/aztree   # macOS and Linux, no Python needed
 
 Or download the executable for Windows, Linux or macOS from the [latest release](https://github.com/milanm/aztree/releases/latest). It doesn't need Python. The downloads aren't signed yet, so Windows and macOS ask once before running them. On Linux and macOS, run `chmod +x` on the file first.
 
-A few antivirus engines, Microsoft Defender among them, flag the Windows executable. It's a false positive that hits many Python tools packed with PyInstaller. Releases after 0.9.2 prove where their executables came from: `gh attestation verify aztree-win-x64.exe --repo milanm/aztree` checks that this repository's release workflow built the file from the tagged commit. If you'd rather not run an executable at all, `pipx install aztree` runs the plain Python source.
+A few antivirus engines, Microsoft Defender among them, flag the Windows executable. It's a false positive that hits many Python tools packed with PyInstaller, and it has been reported to Microsoft. Releases after 0.9.2 prove where their executables came from: `gh attestation verify aztree-win-x64.exe --repo milanm/aztree` checks that this repository's release workflow built the file from the tagged commit. If you'd rather not run an executable at all, `pipx install aztree` runs the plain Python source.
 
 Then:
 
