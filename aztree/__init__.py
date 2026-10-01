@@ -6,7 +6,7 @@
 
 Needs a logged-in Azure CLI (`az login`), or a token in AZURE_ACCESS_TOKEN. No other dependencies.
 """
-__version__ = "0.9.1"
+__version__ = "0.9.2"
 
 import argparse
 import datetime as dt
