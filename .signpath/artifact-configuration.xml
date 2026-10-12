@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- What SignPath signs for aztree: the Windows executable, as the release workflow uploads it (a ZIP holding one file).
+     SignPath keeps its own copy of this configuration; this one is kept in step with it so anyone can see the rules. -->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file path="aztree-win-x64.exe" product-name="aztree" product-version="${version}">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

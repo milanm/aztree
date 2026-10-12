@@ -2,6 +2,8 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # a rehearsal: builds, checks and signs everything (with SignPath's test certificate) and publishes nothing
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -16,6 +18,7 @@ jobs:
         with:
           node-version: "22"
       - name: The tag must match the package version
+        if: github.event_name == 'push'
         run: |
           version=$(python -c "import aztree; print(aztree.__version__)")
           test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME does not match version $version"; exit 1; }
@@ -27,8 +30,10 @@ jobs:
           name: dist
           path: dist/
   publish:
-    # after every executable built: PyPI never takes a version twice, so a failed build must stop the release here
+    # after every executable built: PyPI never takes a version twice, so a failed build must stop the release here.
+    # A rehearsal stops here too, and so skips every job after it.
     needs: [build, binaries]
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -43,6 +48,13 @@ jobs:
     # aztree frozen into one executable per platform, so nobody needs Python; each is checked before it ships
     needs: build
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      actions: read # SignPath fetches the unsigned executable from this run
+    env:
+      # the Windows executable goes to SignPath once SIGNPATH_ORGANIZATION_ID is set: a rehearsal signs it with the test
+      # certificate, a release with the policy SIGNPATH_SIGNING_POLICY names, and stays unsigned while that's unset
+      SIGNING_POLICY: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' && (github.event_name == 'workflow_dispatch' && 'test-signing' || vars.SIGNPATH_SIGNING_POLICY) || '' }}
     strategy:
       matrix:
         include:
@@ -70,6 +82,41 @@ jobs:
           for p in $(python -c "import ssl; p = ssl.get_default_verify_paths(); print(p.openssl_cafile, p.openssl_capath)"); do
             if [ -e "$p.hidden" ]; then sudo mv "$p.hidden" "$p"; fi
           done
+      - name: The version SignPath checks the executable for
+        id: version
+        if: runner.os == 'Windows' && env.SIGNING_POLICY != ''
+        shell: bash
+        run: echo "version=$(python -c 'import aztree; print(aztree.__version__)')" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        id: unsigned
+        if: steps.version.outcome == 'success'
+        with:
+          name: unsigned-${{ matrix.rid }}
+          path: build-native/aztree-${{ matrix.rid }}.exe
+      # .signpath/artifact-configuration.xml says what SignPath will sign; every release waits for Milan to approve it
+      - uses: signpath/github-action-submit-signing-request@v3
+        if: steps.version.outcome == 'success'
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: aztree
+          signing-policy-slug: ${{ env.SIGNING_POLICY }}
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          parameters: |
+            version: "${{ steps.version.outputs.version }}"
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: build-native/signed
+      - name: The signed executable replaces the unsigned one, and still runs
+        if: steps.version.outcome == 'success'
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature build-native/signed/aztree-${{ matrix.rid }}.exe
+          "$($sig.Status): $($sig.SignerCertificate.Subject)"
+          if (-not $sig.SignerCertificate) { throw "SignPath sent back an unsigned file" }
+          # the test certificate is self-signed, so only the real one can be trusted
+          if ($env:SIGNING_POLICY -ne 'test-signing' -and $sig.Status -ne 'Valid') { throw $sig.StatusMessage }
+          Move-Item -Force build-native/signed/aztree-${{ matrix.rid }}.exe build-native/aztree-${{ matrix.rid }}.exe
+          ./build-native/aztree-${{ matrix.rid }}.exe --version
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.rid }}
@@ -89,17 +136,23 @@ jobs:
           merge-multiple: true
           path: native/
       # signed proof that this workflow built each executable from the tagged commit, which anyone can check with
-      # `gh attestation verify <file> --repo milanm/aztree`: the downloads aren't code-signed, and antivirus guesses
+      # `gh attestation verify <file> --repo milanm/aztree`: not every download is code-signed, and antivirus guesses
       - uses: actions/attest-build-provenance@v4
         with:
           subject-path: native/*
       - name: A GitHub release with the executables attached
         env:
           GH_TOKEN: ${{ github.token }}
+          SIGNED: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' && vars.SIGNPATH_SIGNING_POLICY != '' }}
         run: |
+          if [ "$SIGNED" = true ]; then
+            signing="The Windows executable is signed: free code signing provided by SignPath.io, certificate by SignPath Foundation ([code signing policy](https://github.com/milanm/aztree#code-signing-policy)). The macOS downloads aren't signed, so macOS asks once before running them."
+          else
+            signing="The downloads aren't signed yet: Windows and macOS ask once before running them, and a few antivirus engines flag the Windows executable, as they do many Python tools packed with PyInstaller."
+          fi
           notes="$(git log -1 --format=%b)
 
-          Install with \`pipx install aztree\` or \`dotnet tool install -g aztree\`, or download the executable for your system below. The downloads aren't signed yet: Windows and macOS ask once before running them, and a few antivirus engines flag the Windows executable, as they do many Python tools packed with PyInstaller. Check that a download was built here with \`gh attestation verify <file> --repo milanm/aztree\`, or install with pipx, which runs the plain Python source."
+          Install with \`pipx install aztree\` or \`dotnet tool install -g aztree\`, or download the executable for your system below. $signing Check that a download was built here with \`gh attestation verify <file> --repo milanm/aztree\`, or install with pipx, which runs the plain Python source."
           gh release create "$GITHUB_REF_NAME" native/* --title "aztree ${GITHUB_REF_NAME#v}" --notes "$notes"
   nuget:
     # trusted publishing: NuGet.org trusts this workflow, no API key is stored. Off until the NUGET_USER variable is set.

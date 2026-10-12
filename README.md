@@ -176,7 +176,7 @@ The page loads nothing from the internet.
 
 ## Code signing policy
 
-Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org). aztree has applied to the SignPath Foundation program; until it signs the first release, the Windows executable stays unsigned.
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org). SignPath Foundation accepted aztree into its program in October 2026; until its certificate signs the first release, the Windows executable stays unsigned. [.signpath/artifact-configuration.xml](.signpath/artifact-configuration.xml) says what gets signed: only `aztree-win-x64.exe`, and only when it carries the name aztree and the release's version.
 
 Only the release workflow signs, and only executables it builds from this repository's tagged commits. Every signing request is approved by hand.
 
